@@ -31,10 +31,16 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** キーは URL のパスに入るので、`/` を含むキーはここに来る前に弾いておく（src/store.js の形の約束） */
-function entryUrl(universe, datastore, key) {
+/** キーは URL のパスに入るので、`/` を含むキーはここに来る前に弾いておく（src/store.js の形の約束）。
+ *
+ * scope は v2 ではパスの `scopes/<scope>` で表す（省略すると global）。プラグイン側の
+ * `GetDataStore(name, scope)` と同じキースペースを指すので、両方に同じ値を書けば揃う。
+ */
+function entryUrl(universe, datastore, key, scope) {
 	if (key.includes("/")) throw new OpenCloudError(`A key cannot contain /: ${key}`);
-	return `${BASE}/universes/${universe}/data-stores/${encodeURIComponent(datastore)}/entries/${encodeURIComponent(key)}`;
+	const dataStore = `${BASE}/universes/${universe}/data-stores/${encodeURIComponent(datastore)}`;
+	const keyspace = scope === undefined || scope === null ? dataStore : `${dataStore}/scopes/${encodeURIComponent(scope)}`;
+	return `${keyspace}/entries/${encodeURIComponent(key)}`;
 }
 
 async function request(url, init, apiKey) {
@@ -69,13 +75,15 @@ async function request(url, init, apiKey) {
 	throw lastError;
 }
 
-function createClient({ universe, datastore, apiKey = requireApiKey() }) {
+function createClient({ universe, datastore, scope, apiKey = requireApiKey() }) {
 	if (universe === undefined) throw new OpenCloudError("project.universe is missing from rosheet.toml");
 
 	return {
+		label: scope === undefined || scope === null ? `DataStore "${datastore}"` : `DataStore "${datastore}" (${scope})`,
+
 		/** 無いキーは null。値は必ず JSON 文字列として置いてあるので、ここで一段ほどく */
 		async get(key) {
-			const entry = await request(entryUrl(universe, datastore, key), { method: "GET" }, apiKey);
+			const entry = await request(entryUrl(universe, datastore, key, scope), { method: "GET" }, apiKey);
 			if (entry === undefined) return null;
 			if (typeof entry.value !== "string")
 				throw new OpenCloudError(`${key}: not a value rosheet wrote (not a JSON string)`, null);
@@ -83,7 +91,7 @@ function createClient({ universe, datastore, apiKey = requireApiKey() }) {
 		},
 
 		async set(key, value) {
-			const url = `${entryUrl(universe, datastore, key)}?allowMissing=true`;
+			const url = `${entryUrl(universe, datastore, key, scope)}?allowMissing=true`;
 			await request(url, { method: "PATCH", body: JSON.stringify({ value: JSON.stringify(value) }) }, apiKey);
 		},
 	};

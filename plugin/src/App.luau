@@ -53,7 +53,35 @@ end
 -- としか言えなくなる
 local DEFAULT_DATASTORE = "rosheet"
 
-type Loaded = { schema: Schema.Normalized, datastore: string, scope: string? }
+type Loaded = { schema: Schema.Normalized, datastore: string, scope: string?, readOnly: string? }
+
+--[[
+	この place から書いてよいか。`writablePlaces` を宣言していないスキーマは今までどおり全許可。
+
+	同じ universe の place は DataStore を共有するので、本番 place を Studio で開くことが
+	そのまま master data への書き込み権限になる。これはその事故を止めるためのもので、権限の
+	境界ではない（DataStore の権限は universe 単位なので、宣言を書き換えれば書ける）。
+]]
+local function readOnlyReason(declared: { writablePlaces: any }): string?
+	local places = declared.writablePlaces
+	if type(places) ~= "table" or #places == 0 then
+		return nil
+	end
+
+	local placeId = game.PlaceId
+	for _, allowed in places do
+		if allowed == placeId then
+			return nil
+		end
+	end
+
+	-- 番号だけ出しても照合できないので、宣言されている側も並べる
+	local allowed: { string } = {}
+	for _, id in places do
+		table.insert(allowed, tostring(id))
+	end
+	return `This place ({placeId}) is not in writablePlaces ({table.concat(allowed, ", ")}), so rosheet is read-only here`
+end
 
 --[[
 	place の中からスキーマモジュールを見つけて読む。
@@ -94,17 +122,29 @@ local function loadSchema(): (Loaded?, string?)
 			continue
 		end
 
-		local declared = definition :: { datastore: any, scope: any }
+		local declared = definition :: { datastore: any, scope: any, writablePlaces: any }
 		local datastore = if type(declared.datastore) == "string" and declared.datastore ~= ""
 			then declared.datastore
 			else DEFAULT_DATASTORE
 		local scope = if type(declared.scope) == "string" and declared.scope ~= "" then declared.scope else nil
-		return { schema = schema, datastore = datastore, scope = scope }, nil
+		return { schema = schema, datastore = datastore, scope = scope, readOnly = readOnlyReason(declared) }, nil
 	end
 
 	-- 候補はあったのに、どれも読めなかった（rosheet の runtime モジュールのように、
 	-- defineSchema という語を含むだけのモジュールもここに来る）。最後の理由に一手を添える
 	return nil, `{tostring(problem)}. rosheet expects a ModuleScript that returns rosheet.defineSchema(...)`
+end
+
+--[[ 読み直した宣言が前と同じか。同じなら表もツールバーも触らない ]]
+local function sameLoaded(next: Loaded, previous: Loaded?): boolean
+	if previous == nil then
+		return false
+	end
+	local before = previous :: Loaded
+	return next.datastore == before.datastore
+		and next.scope == before.scope
+		and next.readOnly == before.readOnly
+		and Schema.equal(next.schema, before.schema)
 end
 
 -- ============================================================ UI の部品
@@ -162,6 +202,15 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		newRows = {} :: { [string]: { [any]: boolean } },
 		-- 履歴から下書きへ読み込んだ commit。Apply したときに「何へ戻したのか」を残すため
 		restored = nil :: { seq: number, dataset: { [string]: any } }?,
+		-- この place から書けないときの理由（スキーマの writablePlaces）。編集も履歴も読めるが
+		-- Apply だけ押せなくなる
+		readOnly = nil :: string?,
+		-- 最後に読み切れた宣言。place が変わったとき「中身も変わったのか」を見るのに使う
+		loaded = nil :: Loaded?,
+		-- 保存先へ実際に置けたスキーマ。同じものを毎回書き直さないため
+		publishedSchema = nil :: Schema.Normalized?,
+		-- head が pin より何 commit 先か。出荷値は tag から焼くので、Apply しても出荷は動かない
+		tags = { entries = {} },
 		activeSheet = 1,
 		showHistory = false,
 		log = { entries = {} },
@@ -174,9 +223,9 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 	}, App)
 
 	self:_buildChrome()
-	-- Rojo が同期し直したら、rocas の一覧を入れ替える。プラグインを入れ直さないための経路
-	self.watcher = Place.watch(function()
-		self:_placeChanged()
+	-- Rojo が同期し直したら、スキーマと rocas の一覧を追い直す。プラグインを入れ直さないための経路
+	self.watcher = Place.watch(function(reasons: Place.Changes)
+		self:_placeChanged(reasons)
 	end)
 	self:_refreshPlace()
 	-- 名前を引くのは待つので、画面を出してから別スレッドで
@@ -370,12 +419,14 @@ function App._refreshPlace(self: App)
 	local assets, manifest = Place.assets()
 	self.grid:setAssets(assets)
 
-	local watched: { Instance } = {}
+	-- スキーマとアセットを分けて渡す。混ぜると、rocas の manifest が変わっただけで
+	-- 「スキーマが変わった」になり、表を作り直してスクロール位置と選択行が飛ぶ
+	local watched: Place.Watched = { schema = {}, assets = {} }
 	if manifest ~= nil then
-		table.insert(watched, manifest :: ModuleScript)
+		table.insert(watched.assets, manifest :: ModuleScript)
 	end
 	for _, module in Place.schemaModules() do
-		table.insert(watched, module)
+		table.insert(watched.schema, module)
 	end
 
 	local watcher = self.watcher
@@ -387,17 +438,48 @@ end
 --[[
 	Rojo が同期し直した。
 
-	スキーマは読み直さない —— 読み直すと下書きが消える。まだ読めていないときだけもう一度試す
-	（place を開いた直後で、Rojo の同期が追いついていない場合がこれ）。
+	Rojo は同期し直すとき、インスタンスを作り直さずに Source だけ書き換える。Watcher はそれを
+	拾えているので、あとはここで「スキーマが変わったのか」を判断して読み直す。
+
+	読み直すのはスキーマが変わったときだけ。`rbxtsc` のビルド 1 回で `out/` の木ごと入れ替わる
+	プロジェクトがあるので、木の増減で読み直すと、スキーマが 1 文字も変わっていないのに
+	ビルドのたびに DataStore へ書くことになる（Place.Changes で理由を分けているのはそのため）。
+
+	さらに、読み直しても中身が同じなら何もしない。作り直すと表のスクロール位置と選択行が飛ぶ。
+
+	**下書きがあるときは黙って読み直さない。** Apply していない編集は履歴にも無いので戻せない。
+	変わったことだけ出して、捨てるか残すかは編集している側に決めさせる。
 ]]
-function App._placeChanged(self: App)
+function App._placeChanged(self: App, reasons: Place.Changes)
 	if self.root.Parent == nil then
 		return
 	end
+	-- 見張り対象と rocas の一覧はどの変化でも張り直す。飛ばすと次の変化を拾えなくなる
 	self:_refreshPlace()
+
 	if self.schema == nil then
+		-- まだ読めていない。スキーマが後から同期されてくる経路なので、どの変化でも試す
 		self:reload()
+		return
 	end
+	if not reasons.schema then
+		return
+	end
+	-- Apply / Restore の最中は触らない。終わったところで reload が走る
+	if self.busy or self.state == nil then
+		return
+	end
+
+	local loaded = loadSchema()
+	if loaded == nil or sameLoaded(loaded :: Loaded, self.loaded) then
+		return
+	end
+
+	if #self:_changedSheets() > 0 then
+		self:_say("The schema changed. Apply or Discard, then press Reload", true)
+		return
+	end
+	self:reload()
 end
 
 function App.reload(self: App)
@@ -411,6 +493,7 @@ function App.reload(self: App)
 
 	local schema = loaded.schema
 	self.schema = schema
+	self.readOnly = loaded.readOnly
 	self:_refreshPlace()
 
 	-- スキーマが宣言する DataStore が変わったら、それまでの backend は捨てる
@@ -430,10 +513,22 @@ function App.reload(self: App)
 	end
 	local backend = self.backend :: Store.Backend
 
-	local published, failure = Session.publishSchema(backend, schema)
-	if not published then
-		self:_say(`Could not publish the schema: {tostring(failure)}`, true)
-		return
+	-- publish は書き込みなので、必要なときだけにする:
+	--
+	-- - 読み取り専用の place ではしない。本番 place を開いただけでチームのスキーマが
+	--   置き換わるのを避ける
+	-- - 既に置いたものと同じ正規形ならしない。読み直しは place が変わるたびに走るので、
+	--   ここを無条件にすると Rojo の同期 1 回ごとに DataStore へ 1 write する
+	--
+	-- 「置いた」で覚えるのが要点。読んだ内容で覚えると、publish が失敗した回のスキーマを
+	-- 置いたことにしてしまい、次からは同じだからと書き直さなくなる
+	if self.readOnly == nil and not Schema.equal(self.publishedSchema, schema) then
+		local published, failure = Session.publishSchema(backend, schema)
+		if not published then
+			self:_say(`Could not publish the schema: {tostring(failure)}`, true)
+			return
+		end
+		self.publishedSchema = schema
 	end
 
 	local ok, state = Session.readCurrent(backend, schema)
@@ -451,10 +546,21 @@ function App.reload(self: App)
 	local logged, log = Session.readLog(backend)
 	self.log = if logged then log else { entries = {} }
 
+	local tagged, tags = Session.readTags(backend)
+	self.tags = if tagged then tags else { entries = {} }
+
+	-- 最後まで通ったときだけ控える。途中で落ちた回を「読めた」にすると、次に place が
+	-- 変わっても「同じだから何もしない」になり、直すまで追いつけなくなる
+	self.loaded = loaded
+
 	self:_buildTabs()
 	self:_refreshGrid()
 	self:_refreshHistory()
 	self:_refreshToolbar()
+
+	if self.readOnly ~= nil then
+		self:_say(self.readOnly :: string, true)
+	end
 end
 
 function App._buildTabs(self: App)
@@ -580,8 +686,13 @@ function App._refreshToolbar(self: App)
 	local idle = not self.busy
 	local dirty = #changed > 0
 
-	self.applyButton.Text = if self.busy then "Applying..." elseif dirty then `Apply ({#changed})` else "Apply"
-	setEnabled(self.applyButton, idle and dirty)
+	local writable = self.readOnly == nil
+	self.applyButton.Text = if self.busy
+		then "Applying..."
+		elseif not writable then "Read-only"
+		elseif dirty then `Apply ({#changed})`
+		else "Apply"
+	setEnabled(self.applyButton, idle and dirty and writable)
 	-- Discard は常に出す。変更があるときだけ現れると、押せる場所が動いて狙いにくい
 	setEnabled(self.discardButton, idle and dirty)
 
@@ -600,9 +711,34 @@ function App._refreshToolbar(self: App)
 
 	local backend = self.backend :: Store.Backend
 	local where = if Live.isPlaying() then " \u{00B7} playing" else ""
+	local locked = if writable then "" else " \u{00B7} read-only"
 	self.status.Text = if self.busyLabel ~= nil
 		then self.busyLabel :: string
-		else `#{state.head} \u{00B7} {backend.label}{where}`
+		else `#{state.head} \u{00B7} {backend.label}{self:_pinDistance()}{locked}{where}`
+end
+
+--[[
+	出荷値は tag から焼くので、Apply しただけでは出荷は動かない。編集する側が「自分の変更は
+	まだ出荷されていない」と分かるように、head が一番新しい tag より何 commit 先かを出す。
+
+	止めるためのものではない。tag が無ければ何も出さない。
+]]
+function App._pinDistance(self: App): string
+	local latest: { name: string, seq: number }? = nil
+	for _, entry in (self.tags :: any).entries do
+		if type(entry) == "table" and type(entry.seq) == "number" and (latest == nil or entry.seq > (latest :: any).seq) then
+			latest = entry
+		end
+	end
+	if latest == nil then
+		return ""
+	end
+
+	local ahead = (self.state :: Session.State).head - (latest :: any).seq
+	if ahead <= 0 then
+		return ` \u{00B7} {(latest :: any).name}`
+	end
+	return ` \u{00B7} {ahead} ahead of {(latest :: any).name}`
 end
 
 --[[
@@ -783,6 +919,11 @@ end
 
 function App.apply(self: App)
 	if self.busy then
+		return
+	end
+	-- ボタンは無効にしてあるが、書き込みを止めるのはここ 1 箇所にしておく
+	if self.readOnly ~= nil then
+		self:_say(self.readOnly :: string, true)
 		return
 	end
 	local changed = self:_changedSheets()

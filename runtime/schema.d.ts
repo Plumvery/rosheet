@@ -41,12 +41,16 @@ export interface DefinitionOptions {
 	/** プラグインが読み書きする DataStore 名（既定: "rosheet"） */
 	readonly datastore?: string;
 	readonly scope?: string;
+	/** ここに無い place では、プラグインが読み取り専用になる（宣言しなければどの place でも書ける）。
+	 * 事故を止めるためのもので、権限の境界ではない —— DataStore の権限は universe 単位 */
+	readonly writablePlaces?: readonly number[];
 }
 
 export interface Definition {
 	readonly sheets: readonly Sheet[];
 	readonly datastore?: string;
 	readonly scope?: string;
+	readonly writablePlaces?: readonly number[];
 }
 
 export declare function column(name: string, columnType: ColumnType, options?: ColumnOptions): Column;

@@ -48,12 +48,17 @@ async function readDataset(client, schema, commit) {
 	return normalizeDataset(schema, Object.fromEntries(entries.filter(([, value]) => value !== undefined)));
 }
 
-async function readCurrent(client) {
+/** 任意の commit の中身。過去の commit と blob は書き換わらないので、head 以外もそのまま読める */
+async function readAt(client, seq) {
 	const schema = await readSchema(client);
-	const head = await readHead(client);
-	const commit = await readCommit(client, head.seq);
+	const commit = await readCommit(client, seq);
 	const dataset = await readDataset(client, schema, commit);
-	return { schema, head, commit, dataset };
+	return { schema, head: { seq }, commit, dataset };
+}
+
+async function readCurrent(client) {
+	const head = await readHead(client);
+	return readAt(client, head.seq);
 }
 
 function serializeAll(schema, dataset) {
@@ -94,4 +99,26 @@ async function readLog(client) {
 	return (await client.get(store.LOG_KEY)) ?? { entries: [] };
 }
 
-module.exports = { readSchema, readHead, readCommit, readDataset, readCurrent, commitDataset, revert, readLog, serializeAll };
+async function readTags(client) {
+	return (await client.get(store.TAGS_KEY)) ?? store.emptyTags();
+}
+
+async function writeTags(client, tags) {
+	await client.set(store.TAGS_KEY, tags);
+	return tags;
+}
+
+module.exports = {
+	readSchema,
+	readHead,
+	readCommit,
+	readDataset,
+	readAt,
+	readCurrent,
+	commitDataset,
+	revert,
+	readLog,
+	readTags,
+	writeTags,
+	serializeAll,
+};

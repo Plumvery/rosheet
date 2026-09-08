@@ -251,6 +251,35 @@ function Schema.normalize(definition: any): Normalized
 	return { version = 1, sheets = sheets }
 end
 
+--[[
+	正規形どうしが同じ中身かを見る。
+
+	place が変わるたびにスキーマを読み直すので、「読み直したが中身は同じ」を捨てるのに要る。
+	捨てないと、rocas の manifest が変わっただけで表を作り直し、スクロール位置と選択行が飛ぶ。
+
+	JSONEncode で比べない。同じ中身でも辞書のキー順が揃う保証が無く、揺れると「毎回変わった」
+	になる。
+]]
+function Schema.equal(a: any, b: any): boolean
+	if type(a) ~= type(b) then
+		return false
+	end
+	if type(a) ~= "table" then
+		return a == b
+	end
+	for key, value in a do
+		if not Schema.equal(value, (b :: any)[key]) then
+			return false
+		end
+	end
+	for key in b do
+		if (a :: any)[key] == nil then
+			return false
+		end
+	end
+	return true
+end
+
 function Schema.findColumn(sheet: Sheet, name: string): Column?
 	for _, column in sheet.columns do
 		if column.name == name then

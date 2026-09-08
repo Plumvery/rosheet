@@ -11,4 +11,5 @@ module.exports = {
 	generate: require("./generate"),
 	session: require("./session"),
 	store: require("./store"),
+	lock: require("./lock"),
 };

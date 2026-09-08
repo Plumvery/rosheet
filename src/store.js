@@ -16,6 +16,10 @@
 
 const HEAD_KEY = "head";
 const LOG_KEY = "log";
+/** tag は 1 キーにまとめて置く。`tag.<name>` を 1 タグ 1 キーにすると、キーが 50 文字までで
+ * `/` も使えないので `release/1.0` のような名前が入らない。まとめておけばプラグインも 1 回
+ * 読むだけで「head は pin より何 commit 先か」を出せる */
+const TAGS_KEY = "tags";
 /** プラグインが place のスキーマモジュールを require して置き直す。CLI は Luau を評価しないので、
  * CLI から見えるスキーマの正はこのキー（CI 用にローカルへ保存もできる） */
 const SCHEMA_KEY = "schema";
@@ -23,6 +27,11 @@ const SEQ_DIGITS = 6;
 const MAX_KEY_LENGTH = 50;
 /** log に残す件数。1 キー 4MB なので、要約だけならこの件数で収まる */
 const LOG_LIMIT = 200;
+/** tag に残す件数。log と同じ理由で切る */
+const TAG_LIMIT = 200;
+const MAX_TAG_NAME = 64;
+// 生成物のヘッダと rosheet.lock.json に載るので、引用の要らない字だけにする
+const TAG_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 function formatSeq(seq) {
 	return String(seq).padStart(SEQ_DIGITS, "0");
@@ -102,6 +111,41 @@ function planRevert(previous, target, meta) {
 	};
 }
 
+function checkTagName(name) {
+	if (typeof name !== "string" || name.length > MAX_TAG_NAME || !TAG_NAME.test(name))
+		throw new Error(
+			`A tag name must start with a letter or digit and use only [A-Za-z0-9._/-], up to ${MAX_TAG_NAME} characters: ${name}`,
+		);
+	return name;
+}
+
+function emptyTags() {
+	return { entries: [] };
+}
+
+function findTag(tags, name) {
+	return (tags.entries ?? []).find((entry) => entry.name === name);
+}
+
+/** pin の基準にする tag。作った順ではなく指している commit が一番新しいものを採る
+ * （古い commit に後から名前を付けても「出荷済みの先端」は動かない）。
+ *
+ * プラグインが同じ規則をステータス行（`#45 · 3 ahead of v0.3.0`）で実装する。このファイルは
+ * 保存先の形の正なので、Luau 側と揃える規則はここに置く */
+function latestTag(tags) {
+	return (tags.entries ?? []).reduce((best, entry) => (best === undefined || entry.seq > best.seq ? entry : best), undefined);
+}
+
+/** 同じ名前は既定で拒む。tag は「あの時の値」を指す名前なので、黙って動くと意味が無くなる */
+function putTag(tags, entry, options = {}) {
+	const entries = tags.entries ?? [];
+	const existing = findTag(tags, entry.name);
+	if (existing !== undefined && options.force !== true)
+		throw new Error(`tag ${entry.name} already points at #${existing.seq}. Pass --force to move it`);
+	const rest = entries.filter((other) => other.name !== entry.name);
+	return { entries: [entry, ...rest].slice(0, TAG_LIMIT) };
+}
+
 function appendLog(log, commit, changed) {
 	const entries = [
 		{ seq: commit.seq, at: commit.at, by: commit.by, note: commit.note, changed, revertOf: commit.revertOf ?? null },
@@ -114,15 +158,23 @@ module.exports = {
 	HEAD_KEY,
 	LOG_KEY,
 	SCHEMA_KEY,
+	TAGS_KEY,
 	LOG_LIMIT,
+	TAG_LIMIT,
 	MAX_KEY_LENGTH,
 	MAX_SHEET_NAME,
+	MAX_TAG_NAME,
 	formatSeq,
 	commitKey,
 	blobKey,
 	checkSheetNames,
+	checkTagName,
 	emptyHead,
 	emptyCommit,
+	emptyTags,
+	findTag,
+	latestTag,
+	putTag,
 	planCommit,
 	planRevert,
 	appendLog,

@@ -73,6 +73,10 @@ function normalizeConfig(raw, where) {
 	if (typeof output.dir !== "string" || output.dir === "") throw new ConfigError(`${where}: output.dir is required`);
 	if (project.universe !== undefined && typeof project.universe !== "number")
 		throw new ConfigError(`${where}: project.universe must be a number`);
+	// scope はキースペースを分ける。空文字は「既定の global」と区別が付かないので受けない
+	// （黙って捨てると、プラグインと CLI が別のデータを見ていることに気づけない）
+	if (project.scope !== undefined && (typeof project.scope !== "string" || project.scope === ""))
+		throw new ConfigError(`${where}: project.scope must be a non-empty string`);
 
 	return {
 		project: {

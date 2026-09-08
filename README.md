@@ -110,11 +110,22 @@ CLI 側の設定はこれとは別に要る:
 npx rosheet init
 ```
 
-`rosheet.toml` の `project.universe` と `output.dir` を埋める（`pull` / `check` / `log` / `export` / `import` が使う）。DataStore 名を既定の `rosheet` から変えるなら、スキーマモジュール側にも同じ値を書く —— CLI は `rosheet.toml` を読み、プラグインはスキーマモジュールを読むため:
+`rosheet.toml` の `project.universe` と `output.dir` を埋める（`pull` / `check` / `log` / `export` / `import` が使う）。DataStore 名と `scope` を既定から変えるなら、スキーマモジュール側にも同じ値を書く —— CLI は `rosheet.toml` を読み、プラグインはスキーマモジュールを読むため:
 
 ```lua
 return rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "master" })
 ```
+
+**本番の place から書けないようにする。** 同じ universe の place は DataStore を共有するので、本番 place を Studio で開くこと自体が master data への書き込み権限になる。書いてよい place を宣言すると、そこに無い place ではプラグインが読み取り専用になる（表も履歴も読めるが、Apply が押せない。スキーマの publish もしない）:
+
+```lua
+return rosheet.defineSchema({ ... }, {
+	-- ここに無い place では読み取り専用
+	writablePlaces = { 102760853725708 },
+})
+```
+
+宣言しなければ今までどおりどの place からでも書ける。**これは事故を止めるためのもので、権限の境界ではない** —— DataStore の書き込み権限は universe 単位なので、この宣言を書き換えた place を開けば書ける。宣言は git に載るので、増やすには PR が要る。
 
 ### 3. 編集して Apply
 
@@ -158,6 +169,39 @@ print(Guns.get("AK47").damage)
 for _, gun in Guns.rows do ... end
 ```
 
+### 6. 出荷する値を固定する
+
+ここまでの `pull` は **常に head を焼く**。調整が終わったあとに誰かが Studio で Apply すると、次に pull した人がそれごと焼いてしまう。気づく手段は `rosheet log` を見に行くことだけになる。
+
+出口を固定する。調整し終わった commit に名前を付けて、
+
+```bash
+npx rosheet tag v0.3.0 --note "0.3.0 のバランス"
+npx rosheet update --tag v0.3.0
+```
+
+`rosheet.lock.json` がその時点の**スキーマと値ごと**書かれる。以降 `pull` と `check` はこの lock を焼くので、**誰が Apply しても出荷される値は動かない。** 動かすには `rosheet update` を打って lock を差し替える —— それは git の diff になり、PR のレビューに乗る。
+
+```bash
+npx rosheet update --tag v0.4.0   # 別の tag へ pin を移す
+npx rosheet update                # 今の head に追いつく
+npx rosheet status                # head が pin より何 commit 先か
+```
+
+**編集を止める必要は無い。** 調整担当は今までどおり Apply できて、それが勝手に出荷されないだけ。プラグインのステータス行には `#45 · 3 ahead of v0.3.0` のように出るので、編集する側も「自分の変更はまだ出荷されていない」と分かる。
+
+lock がハッシュではなく値ごと持つのは、rosheet を上げて生成物の書式が変わっても `check` が正しく回るようにするため。副産物として、**lock があるコマンドは Open Cloud のキーが要らなくなる**:
+
+```bash
+npx rosheet check              # CI。ネットワークもキーも要らない
+npx rosheet export --local     # lock の値を CSV へ
+npx rosheet import --local     # CSV を lock へ戻して焼き直す（commit は積まない）
+```
+
+DataStore を読むのは `update` / `status` / `log` / `revert` / `import`（`--local` 無し）だけになる。値を 1 個だけ直したい人は `rosheet.lock.json` を直接編集して `rosheet pull` でもよい —— キーを持たない貢献者も、CI も、ブランチ限定の値も、これで閉じる。ブランチごとに違う値を試したければ、そのブランチの lock を差し替えるだけで、本番相当のデータには触らない。
+
+**最初の 1 回だけは Studio の往復が要る。** CLI は Luau を評価しないので、スキーマの出所はプラグインが publish したものになる。`rosheet update` を一度打てば、それ以降はスキーマも lock の中にある。
+
 ## コマンド
 
 | コマンド | すること |
@@ -165,15 +209,23 @@ for _, gun in Guns.rows do ... end
 | `rosheet init` | `rosheet.toml` を書く |
 | `rosheet plugin` | Studio プラグインを Plugins フォルダに置く（一度だけ。何も焼き込まない） |
 | `rosheet runtime` | `defineSchema` / `bind` を持つ runtime のモジュールをプロジェクトへ複製する |
-| `rosheet pull` | DataStore の現在値を読んで生成物を書く |
-| `rosheet check` | 生成物が現在値と違えば落ちる（CI 用。誰かの Apply の取り込み忘れを捕まえる） |
+| `rosheet update [--tag <name>\|--seq <n>]` | `rosheet.lock.json` の pin を動かして生成物を書く（DataStore を読む唯一の生成経路） |
+| `rosheet pull` | pin から生成物を書く（pin が無ければ DataStore の head から） |
+| `rosheet check` | 生成物が pin と違えば落ちる（CI 用） |
+| `rosheet status` | pin と DataStore の head を突き合わせる |
+| `rosheet tag [<name>]` | tag の一覧、または commit に名前を付ける |
 | `rosheet log` | Apply の履歴 |
 | `rosheet revert <seq>` | その commit の値へ戻す commit を積む |
-| `rosheet export --csv <dir>` | 現在値を CSV で書き出す |
-| `rosheet import --csv <dir>` | CSV を読み込んで Apply する |
+| `rosheet export --csv <dir>` | 現在値を CSV で書き出す（`--local` なら lock から） |
+| `rosheet import --csv <dir>` | CSV を読み込んで Apply する（`--local` なら lock を書き換えるだけ） |
 | `rosheet schema --save <file>` | プラグインが公開したスキーマを保存する |
 
-`pull` / `check` / `log` / `export` は Open Cloud の API キー（`ROSHEET_API_KEY`）に `universe-datastores.objects:read` が要る。`import` / `revert` はさらに `:update` が要る。`.env` に置けば読む。
+Open Cloud の API キー（`ROSHEET_API_KEY`）が要るのは DataStore を触るときだけ:
+
+- `universe-datastores.objects:read` —— `update` / `status` / `log` / `export` / `schema`、および pin がまだ無いときの `pull` / `check`
+- 加えて `:update` —— `import`（`--local` 無し）/ `revert` / `tag`
+
+`.env` に置けば読む。**`rosheet.lock.json` があれば `pull` / `check` / `import --local` / `export --local` はキー無しで回る。**
 
 ## DataStore に置く形
 
@@ -184,6 +236,7 @@ for _, gun in Guns.rows do ... end
 | `commit.<seq>` | その Apply のメタ情報と、シートごとの blob 番号 |
 | `blob.<seq>.<sheet>` | そのシートの値（JSON 文字列） |
 | `log` | 履歴の一覧（最新 200 件） |
+| `tags` | commit に付けた名前の一覧（最新 200 件）。CLI が書き、プラグインは読むだけ |
 
 設計上の約束は [src/store.js](src/store.js) の冒頭コメントが正。要点は 3 つ:
 
@@ -193,9 +246,9 @@ for _, gun in Guns.rows do ... end
 
 ## 制約
 
-- プラグインが DataStore を読み書きするには、place が universe に紐づいて公開されていて、**Studio Access to API Services** が入っている必要がある。Studio は本番と同じ DataStore を見るので、テスト用の place で作業する
-- 1 シートの値は 4MB まで（DataStore のキーあたりの上限）
-- 古い blob は消えない。`rosheet gc` は未実装
+- プラグインが DataStore を読み書きするには、place が universe に紐づいて公開されていて、**Studio Access to API Services** が入っている必要がある。同じ universe の place は DataStore を共有するので、テスト用の place で作業する（`writablePlaces` を宣言すれば、本番 place を開いても読み取り専用になる）
+- 1 シートの値は 4MB まで（DataStore のキーあたりの上限）。`rosheet.lock.json` は同じ値を持つので、自然に同じ範囲に収まる
+- 古い blob は消えない。`rosheet gc` は未実装。入れるときは **tag と `rosheet.lock.json` が参照する blob を回収してはいけない**
 
 ## 進捗
 
@@ -205,7 +258,8 @@ for _, gun in Guns.rows do ... end
 | コード生成（`*.luau` / `*.luau` + `*.d.ts`） | 動く | 生成物を Lune で実行して検証 |
 | 履歴の計画（commit / revert / log） | 動く | 単体テスト |
 | CSV の出入り | 動く | 往復の単体テスト |
-| CLI | 実装済み | **実 DataStore との疎通は未確認** |
+| pin（`rosheet.lock.json`）とオフライン生成 | 動く | 単体テストと、一時プロジェクトでの `pull` / `check` / `import --local` / `export --local`（キー無し） |
+| CLI | 実装済み | **実 DataStore との疎通は未確認**（`update` / `status` / `tag` / `log` / `revert` / `import`） |
 | Studio プラグイン | 実装済み | コンパイルと `.rbxmx` の組み立てまで。**Studio 実機は未確認** |
 | ランタイムの live 反映（`bind`） | 実装済み | コンパイルのみ。**Studio 実機は未確認** |
 
