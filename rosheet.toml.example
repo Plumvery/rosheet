@@ -11,7 +11,9 @@
 #   4. Studio で place を開く    # File > Experience Settings > Security で
 #                                # "Enable Studio Access to API Services" を入れておく
 #   5. プラグインでシートを編集して Apply
-#   6. npx rosheet pull          # 生成物を書き出してコミットする
+#   6. npx rosheet update        # rosheet.lock.json に pin を作り、生成物を書き出す
+#                                # 以降 pull / check は lock を焼くので、API キーが要らない
+#                                # 出荷値を動かすのは update だけ = PR のレビューに乗る
 
 [project]
 # Open Cloud から DataStore を読むのに使う。Studio プラグイン側は place 自身の universe を
@@ -24,6 +26,8 @@ universe = 0
 # CLI はここを読み、Studio プラグインはスキーマモジュールを読む
 datastore = "rosheet"
 
+# DataStore の中のキースペース。プラグインの GetDataStore(name, scope) と同じものを指すので、
+# 変えるならスキーマモジュール側にも同じ値を書く（片方だけだと別のデータを見る）
 # scope = "master"
 
 [output]

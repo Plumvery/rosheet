@@ -5,6 +5,10 @@
 -- 保存先を既定（DataStore "rosheet"）から変えるなら、第 2 引数で宣言する:
 --   rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "master" })
 --
+-- 書いてよい place を絞るなら writablePlaces を足す。同じ universe の place は DataStore を
+-- 共有するので、本番 place を Studio で開くこと自体が書き込み権限になる:
+--   rosheet.defineSchema({ ... }, { writablePlaces = { 102760853725708 } })
+--
 -- ReplicatedStorage には置かない。本番のクライアントにまで配信されるため。
 
 local rosheet = require(script.Parent.rosheet.schema)

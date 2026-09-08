@@ -28,6 +28,8 @@ local Session = {}
 local HEAD_KEY = "head"
 local LOG_KEY = "log"
 local SCHEMA_KEY = "schema"
+-- CLI が書く tag の一覧。プラグインは読むだけ（src/store.js と同じキー）
+local TAGS_KEY = "tags"
 local SEQ_DIGITS = 6
 local LOG_LIMIT = 200
 local MAX_KEY_LENGTH = 50
@@ -180,6 +182,20 @@ function Session.readLog(backend: Backend): (boolean, any)
 	return true, if log == nil then { entries = {} } else log
 end
 
+--[[
+	tag の一覧。CLI（`rosheet tag`）が書き、プラグインは読むだけ。
+
+	tag は出荷値の pin なので、プラグインは「head が一番新しい tag より何 commit 先か」を
+	出すのに使う。編集を止めるためのものではない。
+]]
+function Session.readTags(backend: Backend): (boolean, any)
+	local success, tags = readJson(backend, TAGS_KEY)
+	if not success then
+		return false, tags
+	end
+	return true, if tags == nil or type(tags.entries) ~= "table" then { entries = {} } else tags
+end
+
 local function appendLog(backend: Backend, commit: Commit, changed: { string })
 	local success, log = Session.readLog(backend)
 	if not success then
@@ -299,5 +315,6 @@ end
 Session.HEAD_KEY = HEAD_KEY
 Session.LOG_KEY = LOG_KEY
 Session.SCHEMA_KEY = SCHEMA_KEY
+Session.TAGS_KEY = TAGS_KEY
 
 return Session

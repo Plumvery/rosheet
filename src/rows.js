@@ -94,13 +94,30 @@ function emptyDataset(schema) {
 	return dataset;
 }
 
-/** 差分判定と blob の同一性に使う正規形。JSON.stringify のキー順に頼らず列順で組み立てる */
-function serializeSheet(sheet, value) {
-	const ordered =
-		sheet.kind === "scalars"
-			? sheet.columns.reduce((acc, column) => ({ ...acc, [column.name]: value[column.name] }), {})
-			: value.map((row) => sheet.columns.reduce((acc, column) => ({ ...acc, [column.name]: row[column.name] }), {}));
-	return JSON.stringify(ordered);
+/** 列順をスキーマ順に固定した写し。JSON.stringify のキー順に頼らないのが要点で、
+ * 差分判定・blob の同一性・rosheet.lock.json の並びが全部これで一意に決まる */
+function orderSheet(sheet, value) {
+	return sheet.kind === "scalars"
+		? sheet.columns.reduce((acc, column) => ({ ...acc, [column.name]: value[column.name] }), {})
+		: value.map((row) => sheet.columns.reduce((acc, column) => ({ ...acc, [column.name]: row[column.name] }), {}));
 }
 
-module.exports = { DataError, coerceString, normalizeDataset, normalizeSheetValue, emptyDataset, serializeSheet };
+function orderDataset(schema, dataset) {
+	return Object.fromEntries(schema.sheets.map((sheet) => [sheet.name, orderSheet(sheet, dataset[sheet.name])]));
+}
+
+/** 差分判定と blob の同一性に使う正規形 */
+function serializeSheet(sheet, value) {
+	return JSON.stringify(orderSheet(sheet, value));
+}
+
+module.exports = {
+	DataError,
+	coerceString,
+	normalizeDataset,
+	normalizeSheetValue,
+	emptyDataset,
+	orderSheet,
+	orderDataset,
+	serializeSheet,
+};

@@ -199,27 +199,55 @@ end
 local Watcher = {}
 Watcher.__index = Watcher
 
+--[[
+	何が変わったのか。引き金を 1 本にすると区別が付かず、呼び手は「毎回全部やり直す」しか
+	選べない。roblox-ts のプロジェクトでは `rbxtsc` のビルド 1 回で `out/` の木ごと入れ替わり、
+	数百の ModuleScript が足される —— それを「スキーマが変わった」と同じ扱いにすると、
+	ビルドのたびにスキーマを DataStore へ書き直すことになる。
+
+	- `schema` — スキーマの宣言が変わったかもしれない（読み直す価値がある）
+	- `place` — それ以外の木の変化（rocas の一覧と見張り対象を張り直すだけでよい）
+]]
+export type Changes = { schema: boolean, place: boolean }
+
+--[[ 見張るモジュール。理由を分けるので、スキーマとアセットも分けて渡す ]]
+export type Watched = { schema: { Instance }, assets: { Instance } }
+
 export type Watcher = typeof(setmetatable(
 	{} :: {
 		connections: { RBXScriptConnection },
 		sources: { RBXScriptConnection },
-		onChanged: () -> (),
+		onChanged: (Changes) -> (),
 		scheduled: boolean,
+		pending: Changes,
 		alive: boolean,
 	},
 	Watcher
 ))
 
-function Watcher._schedule(self: Watcher)
-	if self.scheduled or not self.alive then
+--[[ debounce の窓の中に来た理由は足し合わせる。潰すのはイベントの数だけで、理由は落とさない ]]
+function Watcher._schedule(self: Watcher, reason: string)
+	if not self.alive then
+		return
+	end
+	if reason == "schema" then
+		self.pending.schema = true
+	else
+		self.pending.place = true
+	end
+
+	if self.scheduled then
 		return
 	end
 	self.scheduled = true
 	task.delay(DEBOUNCE, function()
 		self.scheduled = false
-		if self.alive then
-			self.onChanged()
+		if not self.alive then
+			return
 		end
+		local reasons = self.pending
+		self.pending = { schema = false, place = false }
+		self.onChanged(reasons)
 	end)
 end
 
@@ -227,9 +255,9 @@ end
 	読んだモジュールの Source を見張り直す。読み直すたびに呼ぶ。
 
 	木の増減だけでは足りない。Rojo は既にある ModuleScript の Source を書き換えることがあり、
-	rocas の manifest はまさにその形で更新される。
+	スキーマの更新も rocas の manifest の更新も、まさにその形で届く。
 ]]
-function Watcher.track(self: Watcher, watched: { Instance })
+function Watcher.track(self: Watcher, watched: Watched)
 	for _, connection in self.sources do
 		connection:Disconnect()
 	end
@@ -238,13 +266,20 @@ function Watcher.track(self: Watcher, watched: { Instance })
 		return
 	end
 
-	for _, instance in watched do
+	local function listen(instance: Instance, reason: string)
 		table.insert(
 			self.sources,
 			instance:GetPropertyChangedSignal("Source"):Connect(function()
-				self:_schedule()
+				self:_schedule(reason)
 			end)
 		)
+	end
+
+	for _, instance in watched.schema do
+		listen(instance, "schema")
+	end
+	for _, instance in watched.assets do
+		listen(instance, "place")
 	end
 end
 
@@ -261,21 +296,29 @@ function Watcher.destroy(self: Watcher)
 end
 
 --[[ place の木が変わったら呼び返す。返り値の :track() に、見張りたいモジュールを渡す ]]
-function Place.watch(onChanged: () -> ()): Watcher
+function Place.watch(onChanged: (Changes) -> ()): Watcher
 	local self: Watcher = setmetatable({
 		connections = {},
 		sources = {},
 		onChanged = onChanged,
 		scheduled = false,
+		pending = { schema = false, place = false },
 		alive = true,
 	}, Watcher) :: any
+
+	-- Rojo が Source を書き換えるのではなく、インスタンスごと差し替える経路がある。そこだけは
+	-- 木の増減からスキーマの変化を拾う。判定は名前だけで、Source は読まない ——
+	-- rbxtsc のビルド 1 回で数百の ModuleScript が足されるので、そこで Source を舐めると重い
+	local function reasonFor(descendant: Instance): string
+		return if descendant.Name == SCHEMA_NAME then "schema" else "place"
+	end
 
 	for _, root in roots() do
 		table.insert(
 			self.connections,
 			root.DescendantAdded:Connect(function(descendant: Instance)
 				if descendant:IsA("ModuleScript") and not isReloadCopy(descendant) then
-					self:_schedule()
+					self:_schedule(reasonFor(descendant))
 				end
 			end)
 		)
@@ -283,7 +326,7 @@ function Place.watch(onChanged: () -> ()): Watcher
 			self.connections,
 			root.DescendantRemoving:Connect(function(descendant: Instance)
 				if descendant:IsA("ModuleScript") and not isReloadCopy(descendant) then
-					self:_schedule()
+					self:_schedule(reasonFor(descendant))
 				end
 			end)
 		)
