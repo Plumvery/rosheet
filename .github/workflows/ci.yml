@@ -22,5 +22,6 @@ jobs:
       - uses: CompeyDev/setup-rokit@v0.2.1
       - run: lune run test/schema.test.luau
       - run: lune run test/normalize.test.luau
+      - run: lune run test/session.test.luau
       - run: node test/cross-check.js
       - run: lune run test/plugin-syntax.test.luau

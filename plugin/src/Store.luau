@@ -1,27 +1,28 @@
 --!strict
 -- 保存先。DataStore（チームで共有）と plugin の設定（このマシンだけ）の 2 つを同じ形で扱う。
 --
--- 出入りする値は必ず JSON 文字列。Luau のテーブルをそのまま DataStore へ置くと、空テーブルが
--- `{}` と `[]` のどちらで読み戻るかが Open Cloud 側で決まってしまい、空の表が壊れる。
--- 符号化をこの境界に固定しておけば、CLI 側（src/opencloud.js）と必ず同じ形になる。
-
-local DataStoreService = game:GetService("DataStoreService")
-local HttpService = game:GetService("HttpService")
+-- 呼び手は Luau の値をそのまま渡す。JSON 文字列への符号化はこの中でやる。
+-- 保存先へ置くのは必ず JSON 文字列で、Luau のテーブルをそのまま置くことはしない。テーブルを
+-- 置くと、Open Cloud がそれをどんな JSON に落とすかに全部が乗る（空のテーブルが配列と辞書の
+-- どちらになるか、が典型）。文字列にしておけば、符号化するのは常にここだけになる。
+--
+-- 符号化をこの境界に閉じ込めると、Session が Roblox の API に触らなくなる。おかげで履歴の
+-- 計画（Apply の差分・巻き戻し）を Lune のテストから偽の保存先で回せる。
 
 local Store = {}
 
-export type Result = { ok: true, value: string? } | { ok: false, error: string }
+export type Result = { ok: true, value: any } | { ok: false, error: string }
 
 export type Backend = {
 	kind: string,
 	label: string,
 	get: (key: string) -> Result,
-	set: (key: string, value: string) -> Result,
+	set: (key: string, value: any) -> Result,
 	-- 競合したときに諦めるために、変換関数が nil を返したら書かない
-	update: (key: string, transform: (string?) -> string?) -> Result,
+	update: (key: string, transform: (any) -> any) -> Result,
 }
 
-local function ok(value: string?): Result
+local function ok(value: any): Result
 	return { ok = true, value = value }
 end
 
@@ -29,12 +30,27 @@ local function err(message: string): Result
 	return { ok = false, error = message }
 end
 
+local function encode(value: any): string
+	return game:GetService("HttpService"):JSONEncode(value)
+end
+
+local function decode(key: string, text: string): (boolean, any)
+	local success, value = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(text)
+	end)
+	if not success then
+		return false, `{key}: JSON として読めない`
+	end
+	return true, value
+end
+
 --[[
 	DataStore。place が universe に紐づいて公開されていて、Studio の
 	File > Experience Settings > Security > Enable Studio Access to API Services が要る。
 ]]
 function Store.dataStore(name: string, scope: string?): Backend
-	local store = if scope == nil then DataStoreService:GetDataStore(name) else DataStoreService:GetDataStore(name, scope)
+	local service = game:GetService("DataStoreService")
+	local store = if scope == nil then service:GetDataStore(name) else service:GetDataStore(name, scope)
 
 	-- 既定の GetAsync は 4 秒キャッシュする。Apply の直後に古い値を読むと履歴がずれるので切る
 	local options = Instance.new("DataStoreGetOptions")
@@ -45,46 +61,56 @@ function Store.dataStore(name: string, scope: string?): Backend
 		label = if scope == nil then `DataStore "{name}"` else `DataStore "{name}" ({scope})`,
 
 		get = function(key: string): Result
-			local success, value = pcall(function()
+			local success, raw = pcall(function()
 				return store:GetAsync(key, options)
 			end)
 			if not success then
-				return err(tostring(value))
+				return err(tostring(raw))
 			end
-			if value == nil then
+			if raw == nil then
 				return ok(nil)
 			end
-			if type(value) ~= "string" then
+			if type(raw) ~= "string" then
 				return err(`{key}: rosheet が置いた値でない（JSON 文字列でない）`)
 			end
-			return ok(value)
+			local decoded, value = decode(key, raw)
+			return if decoded then ok(value) else err(value)
 		end,
 
-		set = function(key: string, value: string): Result
+		set = function(key: string, value: any): Result
 			local success, failure = pcall(function()
-				store:SetAsync(key, value)
+				store:SetAsync(key, encode(value))
 			end)
 			return if success then ok(value) else err(tostring(failure))
 		end,
 
-		update = function(key: string, transform: (string?) -> string?): Result
+		update = function(key: string, transform: (any) -> any): Result
 			local aborted = false
-			local success, value = pcall(function()
+			local success, raw = pcall(function()
 				return store:UpdateAsync(key, function(current: string?)
-					local next = transform(current)
+					local value: any = nil
+					if current ~= nil and type(current) == "string" then
+						local decoded, result = decode(key, current)
+						if decoded then
+							value = result
+						end
+					end
+					local next = transform(value)
 					if next == nil then
 						aborted = true
+						return nil
 					end
-					return next
+					return encode(next)
 				end)
 			end)
 			if not success then
-				return err(tostring(value))
+				return err(tostring(raw))
 			end
 			if aborted then
 				return err("競合: 他の誰かが先に書き込んだ")
 			end
-			return ok(value :: string?)
+			local decoded, value = decode(key, raw :: string)
+			return if decoded then ok(value) else err(value)
 		end,
 	}
 end
@@ -103,31 +129,42 @@ function Store.pluginSettings(plugin: Plugin, namespace: string): Backend
 		label = "このマシンのプラグイン設定",
 
 		get = function(key: string): Result
-			local success, value = pcall(function()
+			local success, raw = pcall(function()
 				return plugin:GetSetting(settingKey(key))
 			end)
 			if not success then
-				return err(tostring(value))
+				return err(tostring(raw))
 			end
-			if value == nil then
+			if raw == nil then
 				return ok(nil)
 			end
-			return if type(value) == "string" then ok(value) else err(`{key}: 文字列でない値が入っている`)
+			if type(raw) ~= "string" then
+				return err(`{key}: 文字列でない値が入っている`)
+			end
+			local decoded, value = decode(key, raw)
+			return if decoded then ok(value) else err(value)
 		end,
 
-		set = function(key: string, value: string): Result
+		set = function(key: string, value: any): Result
 			local success, failure = pcall(function()
-				plugin:SetSetting(settingKey(key), value)
+				plugin:SetSetting(settingKey(key), encode(value))
 			end)
 			return if success then ok(value) else err(tostring(failure))
 		end,
 
-		update = function(key: string, transform: (string?) -> string?): Result
+		update = function(key: string, transform: (any) -> any): Result
 			local success, value = pcall(function()
 				local current = plugin:GetSetting(settingKey(key))
-				local next = transform(current)
+				local decodedValue: any = nil
+				if current ~= nil and type(current) == "string" then
+					local decoded, result = decode(key, current)
+					if decoded then
+						decodedValue = result
+					end
+				end
+				local next = transform(decodedValue)
 				if next ~= nil then
-					plugin:SetSetting(settingKey(key), next)
+					plugin:SetSetting(settingKey(key), encode(next))
 				end
 				return next
 			end)
@@ -137,7 +174,7 @@ function Store.pluginSettings(plugin: Plugin, namespace: string): Backend
 			if value == nil then
 				return err("競合: 他の誰かが先に書き込んだ")
 			end
-			return ok(value :: string)
+			return ok(value)
 		end,
 	}
 end
@@ -159,17 +196,6 @@ function Store.probe(backend: Backend): (boolean, string?)
 				.. '"Enable Studio Access to API Services" を入れて、place を公開しておく'
 	end
 	return false, message
-end
-
-function Store.encode(value: any): string
-	return HttpService:JSONEncode(value)
-end
-
-function Store.decode(text: string): (boolean, any)
-	local success, value = pcall(function()
-		return HttpService:JSONDecode(text)
-	end)
-	return success, value
 end
 
 return Store

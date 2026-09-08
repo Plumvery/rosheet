@@ -10,7 +10,18 @@
 
 local Schema = require(script.Parent.Schema)
 local Rows = require(script.Parent.Rows)
-local Store = require(script.Parent.Store)
+
+-- Store.luau をここで require しない。あれは DataStoreService と HttpService に触るので、
+-- 引き込むと履歴の計画を Lune のテストから回せなくなる。要るのは形だけなので型だけ持つ
+export type Result = { ok: true, value: any } | { ok: false, error: string }
+
+export type Backend = {
+	kind: string,
+	label: string,
+	get: (key: string) -> Result,
+	set: (key: string, value: any) -> Result,
+	update: (key: string, transform: (any) -> any) -> Result,
+}
 
 local Session = {}
 
@@ -64,37 +75,29 @@ local function emptyCommit(): Commit
 	return { seq = 0, parent = nil, at = nil, by = nil, note = "", sheets = {} }
 end
 
---[[ 読んだ結果を JSON から戻す。無いキーは nil、壊れていればエラー ]]
-local function readJson(backend: Store.Backend, key: string): (boolean, any)
+--[[ 無いキーは nil。符号化は保存先の中でやるので、ここは Luau の値だけを扱う ]]
+local function readJson(backend: Backend, key: string): (boolean, any)
 	local result = backend.get(key)
 	if not result.ok then
 		return false, result.error
 	end
-	if result.value == nil then
-		return true, nil
-	end
-
-	local decoded, value = Store.decode(result.value)
-	if not decoded then
-		return false, `{key}: JSON として読めない`
-	end
-	return true, value
+	return true, result.value
 end
 
-local function writeJson(backend: Store.Backend, key: string, value: any): (boolean, string?)
-	local result = backend.set(key, Store.encode(value))
+local function writeJson(backend: Backend, key: string, value: any): (boolean, string?)
+	local result = backend.set(key, value)
 	return result.ok, if result.ok then nil else result.error
 end
 
-function Session.publishSchema(backend: Store.Backend, schema: Schema.Normalized): (boolean, string?)
+function Session.publishSchema(backend: Backend, schema: Schema.Normalized): (boolean, string?)
 	return writeJson(backend, SCHEMA_KEY, schema)
 end
 
-function Session.readSchema(backend: Store.Backend): (boolean, any)
+function Session.readSchema(backend: Backend): (boolean, any)
 	return readJson(backend, SCHEMA_KEY)
 end
 
-function Session.readHead(backend: Store.Backend): (boolean, any)
+function Session.readHead(backend: Backend): (boolean, any)
 	local success, head = readJson(backend, HEAD_KEY)
 	if not success then
 		return false, head
@@ -104,7 +107,7 @@ end
 
 --[[ commit が指す blob を集めてデータセットに戻す ]]
 local function readDataset(
-	backend: Store.Backend,
+	backend: Backend,
 	schema: Schema.Normalized,
 	commit: Commit
 ): (boolean, any)
@@ -131,7 +134,7 @@ local function readDataset(
 	return true, dataset
 end
 
-function Session.readCommit(backend: Store.Backend, seq: number): (boolean, any)
+function Session.readCommit(backend: Backend, seq: number): (boolean, any)
 	if seq == 0 then
 		return true, emptyCommit()
 	end
@@ -141,7 +144,7 @@ end
 --[[
 	現在の値を読む。head が指す commit がまだ書かれていない瞬間があるので、少しだけ遡る。
 ]]
-function Session.readCurrent(backend: Store.Backend, schema: Schema.Normalized): (boolean, any)
+function Session.readCurrent(backend: Backend, schema: Schema.Normalized): (boolean, any)
 	local success, head = Session.readHead(backend)
 	if not success then
 		return false, head
@@ -169,7 +172,7 @@ function Session.readCurrent(backend: Store.Backend, schema: Schema.Normalized):
 	return false, `head が指す commit #{head} が見つからない`
 end
 
-function Session.readLog(backend: Store.Backend): (boolean, any)
+function Session.readLog(backend: Backend): (boolean, any)
 	local success, log = readJson(backend, LOG_KEY)
 	if not success then
 		return false, log
@@ -177,7 +180,7 @@ function Session.readLog(backend: Store.Backend): (boolean, any)
 	return true, if log == nil then { entries = {} } else log
 end
 
-local function appendLog(backend: Store.Backend, commit: Commit, changed: { string })
+local function appendLog(backend: Backend, commit: Commit, changed: { string })
 	local success, log = Session.readLog(backend)
 	if not success then
 		return
@@ -203,20 +206,13 @@ local function appendLog(backend: Store.Backend, commit: Commit, changed: { stri
 end
 
 --[[ head を 1 つ進めて自分の commit 番号を確保する。誰かが先に進めていたら諦める ]]
-local function reserve(backend: Store.Backend, expected: number): (boolean, any)
-	local result = backend.update(HEAD_KEY, function(current: string?): string?
-		local seq = 0
-		if current ~= nil then
-			local decoded, head = Store.decode(current)
-			if not decoded then
-				return nil
-			end
-			seq = head.seq
-		end
+local function reserve(backend: Backend, expected: number): (boolean, any)
+	local result = backend.update(HEAD_KEY, function(current: any): any
+		local seq = if current == nil then 0 else current.seq
 		if seq ~= expected then
 			return nil
 		end
-		return Store.encode({ seq = expected + 1 })
+		return { seq = expected + 1 }
 	end)
 
 	if not result.ok then
@@ -226,7 +222,7 @@ local function reserve(backend: Store.Backend, expected: number): (boolean, any)
 end
 
 local function writeCommit(
-	backend: Store.Backend,
+	backend: Backend,
 	commit: Commit,
 	blobs: { { key: string, value: any } },
 	changed: { string }
@@ -251,11 +247,11 @@ end
 	Apply。変わったシートだけ新しい blob を作り、変わらないシートは前の commit の blob を指し直す。
 ]]
 function Session.apply(
-	backend: Store.Backend,
+	backend: Backend,
 	schema: Schema.Normalized,
 	state: State,
 	next: { [string]: Rows.SheetValue },
-	meta: { by: string, note: string? }
+	meta: { at: string, by: string, note: string? }
 ): (boolean, any)
 	local changed: { string } = {}
 	for _, sheet in schema.sheets do
@@ -289,7 +285,7 @@ function Session.apply(
 	local commit: Commit = {
 		seq = seq,
 		parent = if state.head == 0 then nil else state.head,
-		at = DateTime.now():ToIsoDate(),
+		at = meta.at,
 		by = meta.by,
 		note = if meta.note == nil then "" else meta.note,
 		sheets = sheets,
@@ -303,10 +299,10 @@ end
 	履歴を書き換えないので、戻したあとにさらに戻れる。
 ]]
 function Session.revert(
-	backend: Store.Backend,
+	backend: Backend,
 	state: State,
 	target: Commit,
-	meta: { by: string, note: string? }
+	meta: { at: string, by: string, note: string? }
 ): (boolean, any)
 	if target.seq == 0 then
 		return false, "commit #0 は番兵なので戻れない"
@@ -326,7 +322,7 @@ function Session.revert(
 	local commit: Commit = {
 		seq = seq,
 		parent = state.head,
-		at = DateTime.now():ToIsoDate(),
+		at = meta.at,
 		by = meta.by,
 		note = if meta.note == nil then `revert to #{target.seq}` else meta.note,
 		sheets = table.clone(target.sheets),

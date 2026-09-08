@@ -506,7 +506,7 @@ function App.apply(self: App)
 		local backend = self.backend :: Store.Backend
 		local schema = self.schema :: Schema.Normalized
 		local ok, result =
-			Session.apply(backend, schema, self.state :: Session.State, self.draft :: any, { by = author(), note = "" })
+			Session.apply(backend, schema, self.state :: Session.State, self.draft :: any, { at = DateTime.now():ToIsoDate(), by = author(), note = "" })
 
 		self.busy = false
 		if not ok then
@@ -602,7 +602,7 @@ function App.revertTo(self: App, seq: number)
 			return
 		end
 
-		local ok, result = Session.revert(backend, self.state :: Session.State, target, { by = author(), note = nil })
+		local ok, result = Session.revert(backend, self.state :: Session.State, target, { at = DateTime.now():ToIsoDate(), by = author(), note = nil })
 		self.busy = false
 		if not ok then
 			self:_say(`戻せなかった: {tostring(result)}`, true)
