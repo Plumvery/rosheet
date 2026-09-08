@@ -13,7 +13,7 @@ local WIDGET_ID = "rosheetEditor"
 local TITLE = "rosheet"
 
 local toolbar = plugin:CreateToolbar(TITLE)
-local toggle = toolbar:CreateButton("rosheet", "マスターデータを編集する", "rbxasset://textures/StudioSharedUI/menu.png")
+local toggle = toolbar:CreateButton("rosheet", "Edit master data", "rbxasset://textures/StudioSharedUI/menu.png")
 toggle.ClickableWhenViewportHidden = true
 
 local widget = plugin:CreateDockWidgetPluginGui(

@@ -43,7 +43,7 @@ function coerceString(column, raw) {
 }
 
 function normalizeRow(sheet, raw, where) {
-	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) fail(where, "行はオブジェクトでなければならない");
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) fail(where, "a row must be an object");
 	const row = {};
 	for (const column of sheet.columns) {
 		const value = raw[column.name] === undefined ? column.default : raw[column.name];
@@ -65,15 +65,15 @@ function normalizeSheetValue(sheet, raw) {
 	// 直しようのない壊れ方になるため。CSV や手書きの JSON から来る経路もある
 	const source = raw === undefined || raw === null ? [] : raw;
 	const list = !Array.isArray(source) && typeof source === "object" && Object.keys(source).length === 0 ? [] : source;
-	if (!Array.isArray(list)) fail(`sheet ${sheet.name}`, "表の値は配列でなければならない");
+	if (!Array.isArray(list)) fail(`sheet ${sheet.name}`, "a table sheet value must be an array");
 
 	const rows = list.map((row, index) => normalizeRow(sheet, row, `sheet ${sheet.name}[${index}]`));
 	if (sheet.key !== undefined) {
 		const seen = new Set();
 		rows.forEach((row, index) => {
 			const key = row[sheet.key];
-			if (key === "") fail(`sheet ${sheet.name}[${index}]`, `${sheet.key} が空`);
-			if (seen.has(key)) fail(`sheet ${sheet.name}[${index}]`, `${sheet.key} が重複している: ${key}`);
+			if (key === "") fail(`sheet ${sheet.name}[${index}]`, `${sheet.key} is empty`);
+			if (seen.has(key)) fail(`sheet ${sheet.name}[${index}]`, `duplicate ${sheet.key}: ${key}`);
 			seen.add(key);
 		});
 	}

@@ -34,19 +34,19 @@ test("スキーマは宣言順を保つ", () => {
 });
 
 test("スキーマは壊れた宣言を弾く", () => {
-	assert.throws(() => normalizeSchema({ sheets: [] }), /sheets が空/);
-	assert.throws(() => normalizeSchema({ sheets: [{ name: "a", columns: [{ name: "x", type: "nope" }] }] }), /未対応の列の型/);
+	assert.throws(() => normalizeSchema({ sheets: [] }), /sheets is empty/);
+	assert.throws(() => normalizeSchema({ sheets: [{ name: "a", columns: [{ name: "x", type: "nope" }] }] }), /unsupported column type/);
 	assert.throws(
 		() => normalizeSchema({ sheets: [{ name: "a", columns: [{ name: "x", type: "enum" }] }] }),
-		/enum には values が要る/,
+		/enum needs values/,
 	);
 	assert.throws(
 		() => normalizeSchema({ sheets: [{ name: "a", key: "x", columns: [{ name: "x", type: "number" }] }] }),
-		/key の列は string/,
+		/the key column must be a string/,
 	);
 	assert.throws(
 		() => normalizeSchema({ sheets: [{ name: "a", columns: [{ name: "x", type: "number", default: "no" }] }] }),
-		/default が列の型に合わない/,
+		/default does not match the column type/,
 	);
 });
 
@@ -55,10 +55,10 @@ test("行は既定値で埋まり、スキーマ違反は落ちる", () => {
 	assert.deepStrictEqual(dataset.guns[0], { id: "AK", damage: 10, rarity: "Common", enabled: true });
 	assert.deepStrictEqual(dataset.round, { SECONDS: 180 });
 
-	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "A" }, { id: "A" }] }), /id が重複している/);
-	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "A", damage: -1 }] }), /min 0 を下回る/);
-	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "A", rarity: "Nope" }] }), /enum に無い値/);
-	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "" }] }), /id が空/);
+	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "A" }, { id: "A" }] }), /duplicate id/);
+	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "A", damage: -1 }] }), /below min 0/);
+	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "A", rarity: "Nope" }] }), /not one of the allowed values/);
+	assert.throws(() => normalizeDataset(SCHEMA, { guns: [{ id: "" }] }), /id is empty/);
 });
 
 test("正規のシリアライズは列の順序で決まり、キーの並びに揺れない", () => {
@@ -160,8 +160,8 @@ test("巻き戻しは新しい commit として前へ積む", () => {
 test("DataStore のキーは 50 文字と / の制約を守る", () => {
 	assert.ok(store.blobKey(999999, "a".repeat(store.MAX_SHEET_NAME)).length <= store.MAX_KEY_LENGTH);
 	assert.ok(!store.commitKey(1).includes("/"));
-	assert.throws(() => store.checkSheetNames({ sheets: [{ name: "a".repeat(60) }] }), /シート名が長すぎる/);
-	assert.throws(() => entryUrl(1, "ds", "a/b"), /キーに \/ を含められない/);
+	assert.throws(() => store.checkSheetNames({ sheets: [{ name: "a".repeat(60) }] }), /Sheet name is too long/);
+	assert.throws(() => entryUrl(1, "ds", "a/b"), /A key cannot contain \//);
 });
 
 test("log は新しい順で件数を切る", () => {
@@ -182,13 +182,13 @@ test("空の表が {} で読み戻っても壊れない", () => {
 	// Roblox の JSONEncode は空テーブルを {} と [] のどちらで書くか場面で変わる
 	assert.deepStrictEqual(normalizeDataset(SCHEMA, { guns: {} }).guns, []);
 	assert.deepStrictEqual(normalizeDataset(SCHEMA, { guns: [] }).guns, []);
-	assert.throws(() => normalizeDataset(SCHEMA, { guns: { a: 1 } }), /表の値は配列でなければならない/);
+	assert.throws(() => normalizeDataset(SCHEMA, { guns: { a: 1 } }), /a table sheet value must be an array/);
 });
 
 test("プラグインは Script 1 つと ModuleScript の木になる", () => {
 	const { buildPlugin } = require("../src/studio-plugin");
-	const config = normalizeConfig(parseToml('[schema]\npath = "ServerStorage.S"\n[output]\ndir = "o"', "t"), "t");
-	const xml = buildPlugin(config);
+	// 設定を渡さない。プラグインには何も焼かないので、どのプロジェクトでも同じものが出る
+	const xml = buildPlugin();
 
 	const classes = [...xml.matchAll(/<Item class="(\w+)"/g)].map((match) => match[1]);
 	const names = [...xml.matchAll(/<string name="Name">([^<]+)<\/string>/g)].map((match) => match[1]);
@@ -196,9 +196,11 @@ test("プラグインは Script 1 つと ModuleScript の木になる", () => {
 	assert.strictEqual(classes[0], "Script");
 	assert.ok(classes.slice(1).every((className) => className === "ModuleScript"));
 	assert.deepStrictEqual(names[0], "rosheet");
-	for (const required of ["Config", "App", "Grid", "Session", "Store", "Live"]) assert.ok(names.includes(required), required);
+	for (const required of ["Place", "App", "Grid", "Session", "Store", "Live"]) assert.ok(names.includes(required), required);
+	// 焼いた設定とアセット一覧はもう無い
+	for (const gone of ["Config", "Assets"]) assert.ok(!names.includes(gone), gone);
 	// .rbxm を避けた理由がこれ。rbxm-parser は Script.Source の非 ASCII を壊す
-	assert.ok(xml.includes("マスターデータ"));
+	assert.ok(xml.includes("rosheet の Studio プラグイン"));
 	assert.strictEqual((xml.match(/<!\[CDATA\[/g) || []).length, (xml.match(/\]\]>/g) || []).length);
 });
 
@@ -210,8 +212,8 @@ test("asset 列は rocas:// も受ける", () => {
 	assert.strictEqual(checkValue(column, ""), null);
 	assert.strictEqual(checkValue(column, "rbxassetid://123"), null);
 	assert.strictEqual(checkValue(column, "rocas://assets/images/maps/SciFi.png"), null);
-	assert.match(checkValue(column, "rocas://images/maps/SciFi.png"), /どれでもない/);
-	assert.match(checkValue(column, "SciFi.png"), /どれでもない/);
+	assert.match(checkValue(column, "rocas://images/maps/SciFi.png"), /not empty, rbxassetid/);
+	assert.match(checkValue(column, "SciFi.png"), /not empty, rbxassetid/);
 });
 
 test("生成の直前に asset を解決し、解決できない値は落とす", () => {
@@ -241,5 +243,4 @@ test("生成の直前に asset を解決し、解決できない値は落とす"
 	assert.strictEqual(real.resolve("", "x"), "");
 	assert.strictEqual(real.resolve("rbxassetid://5", "x"), "rbxassetid://5");
 	assert.throws(() => real.resolve("rocas://images/a.png", "x"), AssetError);
-	assert.deepStrictEqual(real.entries(), []);
 });

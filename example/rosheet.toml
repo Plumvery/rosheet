@@ -4,9 +4,6 @@
 universe = 0
 datastore = "rosheet"
 
-[schema]
-path = "ServerStorage.RosheetSchema"
-
 [output]
 format = "luau"
 dir = "example/generated"

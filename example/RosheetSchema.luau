@@ -1,6 +1,9 @@
 --!strict
 -- rosheet のスキーマの例。この ModuleScript を place の ServerStorage に
--- `RosheetSchema` という名前で置くと、プラグインがこれを読んで表を出す。
+-- `RosheetSchema` という名前で置くと、プラグインが走査して見つけ、読んで表を出す。
+--
+-- 保存先を既定（DataStore "rosheet"）から変えるなら、第 2 引数で宣言する:
+--   rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "master" })
 --
 -- ReplicatedStorage には置かない。本番のクライアントにまで配信されるため。
 

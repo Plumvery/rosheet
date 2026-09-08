@@ -24,7 +24,7 @@ function parseScalar(raw, where) {
 	const numeric = text.replace(/_/g, "");
 	if (/^-?\d+$/.test(numeric)) return Number(numeric);
 	if (/^-?\d+\.\d+$/.test(numeric)) return Number(numeric);
-	throw new ConfigError(`${where}: 値として読めない: ${raw}`);
+	throw new ConfigError(`${where}: not a readable value: ${raw}`);
 }
 
 function stripComment(line) {
@@ -57,7 +57,7 @@ function parseToml(text, where) {
 		}
 
 		const pair = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
-		if (pair === null) throw new ConfigError(`${at}: [table] でも key = value でもない: ${rawLine.trim()}`);
+		if (pair === null) throw new ConfigError(`${at}: neither [table] nor key = value: ${rawLine.trim()}`);
 		table[pair[1]] = parseScalar(pair[2], at);
 	});
 
@@ -67,23 +67,18 @@ function parseToml(text, where) {
 function normalizeConfig(raw, where) {
 	const project = raw.project ?? {};
 	const output = raw.output ?? {};
-	const schema = raw.schema ?? {};
 
 	const format = output.format ?? "luau";
-	if (!FORMATS.has(format)) throw new ConfigError(`${where}: output.format は ${[...FORMATS].join(" / ")} のどれか: ${format}`);
-	if (typeof output.dir !== "string" || output.dir === "") throw new ConfigError(`${where}: output.dir が要る`);
+	if (!FORMATS.has(format)) throw new ConfigError(`${where}: output.format must be one of ${[...FORMATS].join(" / ")}: ${format}`);
+	if (typeof output.dir !== "string" || output.dir === "") throw new ConfigError(`${where}: output.dir is required`);
 	if (project.universe !== undefined && typeof project.universe !== "number")
-		throw new ConfigError(`${where}: project.universe は数値`);
+		throw new ConfigError(`${where}: project.universe must be a number`);
 
 	return {
 		project: {
 			universe: project.universe,
 			datastore: project.datastore ?? DEFAULT_DATASTORE,
 			scope: project.scope,
-		},
-		schema: {
-			// place 内のスキーマモジュールの場所。プラグインだけが使う（CLI は Luau を評価しない）
-			path: schema.path ?? "ServerStorage.RosheetSchema",
 		},
 		output: {
 			format,
@@ -94,7 +89,7 @@ function normalizeConfig(raw, where) {
 
 function loadConfig(cwd = process.cwd()) {
 	const file = path.join(cwd, CONFIG_FILE);
-	if (!existsSync(file)) throw new ConfigError(`${CONFIG_FILE} が無い: ${file}`);
+	if (!existsSync(file)) throw new ConfigError(`${CONFIG_FILE} not found: ${file}`);
 	return normalizeConfig(parseToml(readFileSync(file, "utf8"), CONFIG_FILE), CONFIG_FILE);
 }
 

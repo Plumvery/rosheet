@@ -375,7 +375,7 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 		button.Parent = frame
 		cell.button = button
 
-		-- クリックすると何か起きる列だと分かるようにする。見た目がただの文字だと気付けない
+		-- クリックすると候補が出る列だと分かるようにする。見た目がただの文字だと気付けない
 		local affordance = Instance.new("TextLabel")
 		affordance.BackgroundTransparency = 1
 		affordance.AnchorPoint = Vector2.new(1, 0)
@@ -384,7 +384,7 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 		affordance.Font = Theme.FONT
 		affordance.TextSize = Theme.TEXT_SIZE
 		affordance.TextColor3 = colors.dimText
-		affordance.Text = if column.type == "enum" then DROPDOWN_ARROW else "\u{21C4}"
+		affordance.Text = DROPDOWN_ARROW
 		affordance.Parent = frame
 
 		button.Activated:Connect(function()
@@ -440,7 +440,7 @@ end
 
 --[[
 	scalars の 1 行。「名前 | 値」の 2 セルで、値の列の型は行ごとに変わる。
-	値のセルは常に TextBox を持ち、boolean と enum のときだけ右端に切り替えボタンを出す。
+	値のセルは常に TextBox を持ち、boolean と enum のときだけ右端に候補を開くボタンを出す。
 ]]
 function Grid._buildScalarCells(self: Grid, row: Row)
 	local colors = palette()
@@ -629,6 +629,28 @@ function Grid._openList(
 	end
 end
 
+--[[
+	boolean の候補。
+
+	クリックで反転させると、値を見るために触っただけで変わってしまう。2 値でも enum と同じく
+	候補から選ばせる。
+]]
+function Grid._openBooleans(self: Grid, row: Row, cell: Cell, column: Schema.Column)
+	local index = row.index
+	local callbacks = self.callbacks
+	if index == nil or callbacks == nil then
+		return
+	end
+
+	local current = self:_cellValue(index, column.name)
+	self:_openList(cell.frame, { { text = "true" }, { text = "false" } }, displayText(column, current), true, function(picked: string)
+		self:_select(index)
+		if callbacks.onEdit(index, column.name, picked == "true") then
+			self:_bindVisible()
+		end
+	end)
+end
+
 --[[ enum の候補 ]]
 function Grid._openDropdown(self: Grid, row: Row, cell: Cell, column: Schema.Column)
 	local index = row.index
@@ -651,7 +673,7 @@ function Grid._openDropdown(self: Grid, row: Row, cell: Cell, column: Schema.Col
 	end)
 end
 
---[[ rocas:// を打っている途中に、lock にあるパスから絞って出す ]]
+--[[ rocas:// を打っている途中に、manifest にあるパスから絞って出す ]]
 function Grid._openAssetSuggestions(self: Grid, row: Row, cell: Cell, column: Schema.Column, typed: string)
 	local index = row.index
 	local callbacks = self.callbacks
@@ -683,7 +705,7 @@ function Grid._openAssetSuggestions(self: Grid, row: Row, cell: Cell, column: Sc
 	end)
 end
 
---[[ 焼き込んだ rocas の一覧を受け取る。rocas を使っていないプロジェクトでは空 ]]
+--[[ place から読んだ rocas の一覧を受け取る。rocas を使っていないプロジェクトでは空 ]]
 function Grid.setAssets(self: Grid, assets: { { path: string, assetId: string, kind: string } })
 	self.assets = assets
 end
@@ -734,7 +756,7 @@ function Grid._attachAsset(self: Grid, row: Row, cell: Cell, box: TextBox)
 	end)
 end
 
---[[ boolean は 2 値なので反転で足りる。enum は候補から選ばせる ]]
+--[[ boolean も enum も候補から選ばせる ]]
 function Grid._pick(self: Grid, row: Row, cell: Cell)
 	local index = row.index
 	local callbacks = self.callbacks
@@ -745,15 +767,8 @@ function Grid._pick(self: Grid, row: Row, cell: Cell)
 
 	if column.type == "enum" then
 		self:_openDropdown(row, cell, column)
-		return
-	end
-	if column.type ~= "boolean" then
-		return
-	end
-
-	self:_select(index)
-	if callbacks.onEdit(index, column.name, not self:_cellValue(index, column.name)) then
-		self:_bindVisible()
+	elseif column.type == "boolean" then
+		self:_openBooleans(row, cell, column)
 	end
 end
 

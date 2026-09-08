@@ -42,7 +42,7 @@ const MAX_SHEET_NAME = MAX_KEY_LENGTH - blobKey(0, "").length;
 function checkSheetNames(schema) {
 	for (const sheet of schema.sheets)
 		if (sheet.name.length > MAX_SHEET_NAME)
-			throw new Error(`シート名が長すぎる（DataStore のキーが ${MAX_KEY_LENGTH} 文字を超える）: ${sheet.name}`);
+			throw new Error(`Sheet name is too long (the DataStore key would exceed ${MAX_KEY_LENGTH} characters): ${sheet.name}`);
 }
 
 function emptyHead() {

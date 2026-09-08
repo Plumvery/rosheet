@@ -136,7 +136,7 @@ function Live.bind<T>(baked: T, sheetName: string): T
 				return (baked :: any)[key]
 			end,
 			__newindex = function()
-				error("rosheet: bind の戻り値は書き換えられない", 2)
+				error("rosheet: the table returned by bind is read-only", 2)
 			end,
 		}) :: any
 	) :: T

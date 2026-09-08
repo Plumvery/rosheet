@@ -28,6 +28,8 @@ Studio プラグイン ──▶ DataStore（編集の正・Apply ごとの履�
 - **Apply ごとの履歴**。1 回の Apply が 1 つの commit として DataStore に積まれる。一個前へ戻る、任意の時点をもう一度試す、ができる
 - **型付きのコード生成**。`*.luau`（`--!strict`）と、roblox-ts 向けの `*.luau` + `*.d.ts`
 - **CSV の出入り**。スプレッドシートや外部ツールと往復する退路。CSV は経路の外にあり、正ではない
+- **rocas のアセットを引ける**。`asset` 列に `rocas://assets/...` を書くと、Studio では rocas の manifest から補完とサムネイルが出て、`pull` のときに `rbxassetid://` へ解決される
+- **プラグインは入れ直さない**。設定もスキーマもアセット一覧も焼き込まず、place の中から読む
 
 ## 使い方
 
@@ -61,13 +63,7 @@ return rosheet.defineSchema({
 
 roblox-ts なら同じものを TypeScript で書く（`runtime/schema.d.ts` が型を持つ）。
 
-### 2. 設定して、プラグインを入れる
-
-```bash
-npx rosheet init
-```
-
-`rosheet.toml` の `project.universe` と `output.dir` を埋めてから:
+### 2. プラグインを入れる（一度だけ）
 
 ```bash
 npx rosheet plugin
@@ -75,13 +71,27 @@ npx rosheet plugin
 
 Studio の Plugins フォルダに `rosheet.rbxmx` が置かれる。Studio 側で **File > Experience Settings > Security > Enable Studio Access to API Services** を入れておく。
 
+**プラグインには何も焼き込まない。** スキーマも、保存先の DataStore 名も、rocas のアセット一覧も、プラグインが place の中から読む —— `ServerStorage` と `ReplicatedStorage` を走査して、Rojo が同期したモジュールを見つけ、`DescendantAdded` / Source の変化で追い直す。スキーマを直しても、アセットを足しても、プラグインは入れ直さなくてよい。
+
+CLI 側の設定はこれとは別に要る:
+
+```bash
+npx rosheet init
+```
+
+`rosheet.toml` の `project.universe` と `output.dir` を埋める（`pull` / `check` / `log` / `export` / `import` が使う）。DataStore 名を既定の `rosheet` から変えるなら、スキーマモジュール側にも同じ値を書く —— CLI は `rosheet.toml` を読み、プラグインはスキーマモジュールを読むため:
+
+```lua
+return rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "master" })
+```
+
 ### 3. 編集して Apply
 
 Studio で place を開き、ツールバーの rosheet を押すとウィンドウが出る。
 
 - 下のタブがシート。ヘッダ行と行番号の列は固定で、本体だけがスクロールする
 - `readonly` の列はグレーで、編集できない
-- `boolean` と `enum` はクリックで次の値へ切り替わる。それ以外のセルは TextBox なので、Studio 上では Ctrl+C / Ctrl+V がそのまま効く
+- `boolean` と `enum` はクリックで候補が開き、選んだ値が入る。それ以外のセルは TextBox なので、Studio 上では Ctrl+C / Ctrl+V がそのまま効く
 - 編集は下書きに溜まり、変えたセルが黄色く残る。**Apply を押すまで保存先に触らない**
 - Apply を押すと 1 つの commit として積まれ、プレイテスト中なら値がその場で入れ替わる
 - 「履歴」で過去の Apply が並ぶ。「戻す」でその時点の値に戻る（履歴は書き換えず、戻した結果を新しい commit として積むので、戻したあとにさらに戻れる）
@@ -121,7 +131,7 @@ for _, gun in Guns.rows do ... end
 | コマンド | すること |
 |---|---|
 | `rosheet init` | `rosheet.toml` を書く |
-| `rosheet plugin` | Studio プラグインを生成して Plugins フォルダに置く |
+| `rosheet plugin` | Studio プラグインを Plugins フォルダに置く（一度だけ。何も焼き込まない） |
 | `rosheet pull` | DataStore の現在値を読んで生成物を書く |
 | `rosheet check` | 生成物が現在値と違えば落ちる（CI 用。誰かの Apply の取り込み忘れを捕まえる） |
 | `rosheet log` | Apply の履歴 |
@@ -170,24 +180,7 @@ for _, gun in Guns.rows do ... end
 
 ## 次にやること
 
-### 1. rocas のアセット一覧を Studio 側から読む
-
-今は `rosheet plugin` が rocas の lock を読んで一覧をプラグインへ焼いている（[src/studio-plugin.js](src/studio-plugin.js) の `assetsModule`）。焼いた時点の写しなので、アセットを足したら打ち直しが要る。
-
-**rocas のプラグインはファイルシステムを読んでいない。** 確認した実装はこうだった:
-
-- `findManifest()` が `ReplicatedStorage:GetDescendants()` を走査して、Rojo が同期した manifest の ModuleScript を見つける（`rocas manifest` が `src/shared/RocasManifest.luau` に書くもの）
-- `ReplicatedStorage.DescendantAdded` / `DescendantRemoving` を購読して、Rojo が同期し直したら読み直す
-
-つまり「ファイルを読む」ではなく「Rojo が同期したモジュールを読み、変化を追う」。HTTP も権限も要らず、Rojo が動いていれば即座に反映される。
-
-rosheet も同じ形にできる。**manifest の各要素は `sourcePath` を持ち、その値は cwd 相対のパス**（`assets/images/maps/SciFi.png`）で、`rocas://` が使う形とそのまま一致する（uploaded モードでも入る。rocas の `buildStudioPluginManifest` で確認）。なので group とディレクトリの対応を別途持つ必要はなく、manifest だけで `rocas://assets/...` を解決できる。
-
-やること: プラグインが manifest モジュールを走査して見つけ、`DescendantAdded` / `DescendantRemoving` で読み直す。焼いた一覧は manifest が無いときのフォールバックとして残す。
-
-### 2. CLI のメッセージを英語にする
-
-プラグイン側の文言は英語に揃えたが、CLI（`src/*.js` と `bin/rosheet.js`）はまだ日本語。同じツールの中で分かれているのはよくないので揃える。コード中のコメントは日本語のままでよい。
+**Studio の実機で往復を確かめる。** CLI もプラグインもコードとしては通っているが、実 DataStore との疎通、Apply からプレイテストへの反映、rocas の manifest の読み取りは、まだ Studio で確認していない。
 
 ## ライセンス
 

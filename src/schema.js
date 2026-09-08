@@ -37,14 +37,14 @@ function implicitDefault(column) {
 }
 
 function normalizeColumn(raw, where) {
-	if (raw === null || typeof raw !== "object") fail(where, "列はオブジェクトでなければならない");
+	if (raw === null || typeof raw !== "object") fail(where, "a column must be an object");
 	const name = raw.name;
 	if (typeof name !== "string" || !IDENTIFIER.test(name))
-		fail(where, `列名が識別子として使えない: ${JSON.stringify(name)}`);
+		fail(where, `column name is not a usable identifier: ${JSON.stringify(name)}`);
 
 	const at = `${where}.${name}`;
 	const type = raw.type;
-	if (!COLUMN_TYPES.has(type)) fail(at, `未対応の列の型: ${JSON.stringify(type)}`);
+	if (!COLUMN_TYPES.has(type)) fail(at, `unsupported column type: ${JSON.stringify(type)}`);
 
 	const column = {
 		name,
@@ -55,47 +55,47 @@ function normalizeColumn(raw, where) {
 
 	if (type === "enum") {
 		const values = raw.values;
-		if (!Array.isArray(values) || values.length === 0) fail(at, "enum には values が要る");
-		for (const value of values) if (typeof value !== "string") fail(at, "enum の values は文字列だけ");
-		if (new Set(values).size !== values.length) fail(at, "enum の values が重複している");
+		if (!Array.isArray(values) || values.length === 0) fail(at, "enum needs values");
+		for (const value of values) if (typeof value !== "string") fail(at, "enum values must all be strings");
+		if (new Set(values).size !== values.length) fail(at, "duplicate enum values");
 		column.values = [...values];
 	}
 
 	if (type === "number" || type === "integer") {
 		if (raw.min !== undefined) {
-			if (typeof raw.min !== "number" || !Number.isFinite(raw.min)) fail(at, "min が有限の数値でない");
+			if (typeof raw.min !== "number" || !Number.isFinite(raw.min)) fail(at, "min is not a finite number");
 			column.min = raw.min;
 		}
 		if (raw.max !== undefined) {
-			if (typeof raw.max !== "number" || !Number.isFinite(raw.max)) fail(at, "max が有限の数値でない");
+			if (typeof raw.max !== "number" || !Number.isFinite(raw.max)) fail(at, "max is not a finite number");
 			column.max = raw.max;
 		}
 		if (column.min !== undefined && column.max !== undefined && column.min > column.max)
-			fail(at, `min が max を超えている: ${column.min} > ${column.max}`);
+			fail(at, `min is greater than max: ${column.min} > ${column.max}`);
 	}
 
 	column.default = raw.default === undefined ? implicitDefault(column) : raw.default;
 	const problem = checkValue(column, column.default);
-	if (problem !== null) fail(at, `default が列の型に合わない: ${problem}`);
+	if (problem !== null) fail(at, `default does not match the column type: ${problem}`);
 
 	return column;
 }
 
 function normalizeSheet(raw, where) {
-	if (raw === null || typeof raw !== "object") fail(where, "シートはオブジェクトでなければならない");
+	if (raw === null || typeof raw !== "object") fail(where, "a sheet must be an object");
 	const name = raw.name;
 	if (typeof name !== "string" || !IDENTIFIER.test(name))
-		fail(where, `シート名が識別子として使えない: ${JSON.stringify(name)}`);
+		fail(where, `sheet name is not a usable identifier: ${JSON.stringify(name)}`);
 
 	const at = `sheet ${name}`;
 	const kind = raw.kind === undefined ? "table" : raw.kind;
-	if (!SHEET_KINDS.has(kind)) fail(at, `未対応のシートの種別: ${JSON.stringify(kind)}`);
+	if (!SHEET_KINDS.has(kind)) fail(at, `unsupported sheet kind: ${JSON.stringify(kind)}`);
 
-	if (!Array.isArray(raw.columns) || raw.columns.length === 0) fail(at, "columns が空");
+	if (!Array.isArray(raw.columns) || raw.columns.length === 0) fail(at, "columns is empty");
 	const columns = raw.columns.map((column) => normalizeColumn(column, at));
 	const seen = new Set();
 	for (const column of columns) {
-		if (seen.has(column.name)) fail(at, `列名が重複している: ${column.name}`);
+		if (seen.has(column.name)) fail(at, `duplicate column name: ${column.name}`);
 		seen.add(column.name);
 	}
 
@@ -113,8 +113,8 @@ function normalizeSheet(raw, where) {
 		const key = raw.key === undefined || raw.key === null ? undefined : raw.key;
 		if (key !== undefined) {
 			const keyColumn = columns.find((column) => column.name === key);
-			if (keyColumn === undefined) fail(at, `key に指定された列が無い: ${key}`);
-			if (keyColumn.type !== "string") fail(at, `key の列は string でなければならない: ${key} は ${keyColumn.type}`);
+			if (keyColumn === undefined) fail(at, `no such column for key: ${key}`);
+			if (keyColumn.type !== "string") fail(at, `the key column must be a string: ${key} is ${keyColumn.type}`);
 			sheet.key = key;
 		}
 		sheet.rows = raw.rows === "fixed" ? "fixed" : "open";
@@ -128,13 +128,13 @@ function normalizeSheet(raw, where) {
 
 /** 検証を通った正規形を返す。入力は壊さない */
 function normalizeSchema(raw) {
-	if (raw === null || typeof raw !== "object") fail("schema", "スキーマはオブジェクトでなければならない");
-	if (!Array.isArray(raw.sheets) || raw.sheets.length === 0) fail("schema", "sheets が空");
+	if (raw === null || typeof raw !== "object") fail("schema", "a schema must be an object");
+	if (!Array.isArray(raw.sheets) || raw.sheets.length === 0) fail("schema", "sheets is empty");
 
 	const sheets = raw.sheets.map((sheet, index) => normalizeSheet(sheet, `sheets[${index}]`));
 	const seen = new Set();
 	for (const sheet of sheets) {
-		if (seen.has(sheet.name)) fail("schema", `シート名が重複している: ${sheet.name}`);
+		if (seen.has(sheet.name)) fail("schema", `duplicate sheet name: ${sheet.name}`);
 		seen.add(sheet.name);
 	}
 
@@ -147,31 +147,31 @@ function checkValue(column, value) {
 	switch (column.type) {
 		case "string":
 		case "text":
-			return typeof value === "string" ? null : `文字列でない: ${JSON.stringify(value)}`;
+			return typeof value === "string" ? null : `not a string: ${JSON.stringify(value)}`;
 		case "number":
 		case "integer": {
-			if (typeof value !== "number" || !Number.isFinite(value)) return `有限の数値でない: ${JSON.stringify(value)}`;
-			if (column.type === "integer" && !Number.isInteger(value)) return `整数でない: ${value}`;
-			if (column.min !== undefined && value < column.min) return `min ${column.min} を下回る: ${value}`;
-			if (column.max !== undefined && value > column.max) return `max ${column.max} を超える: ${value}`;
+			if (typeof value !== "number" || !Number.isFinite(value)) return `not a finite number: ${JSON.stringify(value)}`;
+			if (column.type === "integer" && !Number.isInteger(value)) return `not an integer: ${value}`;
+			if (column.min !== undefined && value < column.min) return `below min ${column.min}: ${value}`;
+			if (column.max !== undefined && value > column.max) return `above max ${column.max}: ${value}`;
 			return null;
 		}
 		case "boolean":
-			return typeof value === "boolean" ? null : `真偽値でない: ${JSON.stringify(value)}`;
+			return typeof value === "boolean" ? null : `not a boolean: ${JSON.stringify(value)}`;
 		case "enum":
-			if (typeof value !== "string") return `文字列でない: ${JSON.stringify(value)}`;
-			return column.values.includes(value) ? null : `enum に無い値: ${JSON.stringify(value)}`;
+			if (typeof value !== "string") return `not a string: ${JSON.stringify(value)}`;
+			return column.values.includes(value) ? null : `not one of the allowed values: ${JSON.stringify(value)}`;
 		case "asset":
-			if (typeof value !== "string") return `文字列でない: ${JSON.stringify(value)}`;
+			if (typeof value !== "string") return `not a string: ${JSON.stringify(value)}`;
 			// 空を許すのは「まだ差し替えていない」を表せないと運用で嘘の ID を入れる羽目になるため。
 			// rocas:// は生成のときに解決する（src/assets.js）。保存先にはこの形のまま置く
 			if (value === "" || ASSET_VALUE.test(value) || ROCAS_VALUE.test(value)) return null;
-			return `空 / rbxassetid://<数字> / rocas://assets/... のどれでもない: ${JSON.stringify(value)}`;
+			return `not empty, rbxassetid://<number> or rocas://assets/...: ${JSON.stringify(value)}`;
 		case "color":
-			if (typeof value !== "string") return `文字列でない: ${JSON.stringify(value)}`;
-			return COLOR_VALUE.test(value) ? null : `#RRGGBB でない: ${JSON.stringify(value)}`;
+			if (typeof value !== "string") return `not a string: ${JSON.stringify(value)}`;
+			return COLOR_VALUE.test(value) ? null : `not #RRGGBB: ${JSON.stringify(value)}`;
 		default:
-			return `未対応の列の型: ${column.type}`;
+			return `unsupported column type: ${column.type}`;
 	}
 }
 

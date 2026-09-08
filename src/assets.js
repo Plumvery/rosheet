@@ -34,9 +34,9 @@ function createResolver(cwd = process.cwd()) {
 
 		const rocas = loadRocas();
 		if (rocas === null)
-			throw new AssetError(`${ROCAS_SCHEME} を使うには @plumvery/rocas が要る（npm i -D @plumvery/rocas）`);
+			throw new AssetError(`${ROCAS_SCHEME} needs @plumvery/rocas (npm i -D @plumvery/rocas)`);
 		if (!existsSync(path.join(cwd, "rocas.toml")))
-			throw new AssetError(`${ROCAS_SCHEME} を使うには rocas.toml が要る: ${path.join(cwd, "rocas.toml")}`);
+			throw new AssetError(`${ROCAS_SCHEME} needs rocas.toml: ${path.join(cwd, "rocas.toml")}`);
 
 		// lock はリポジトリ内のファイルなので、引いてもネットワークは要らない
 		byRelativePath = rocas.buildAssetMap(rocas.loadConfig(cwd), cwd).byRelativePath;
@@ -49,28 +49,17 @@ function createResolver(cwd = process.cwd()) {
 			const value = typeof raw === "string" ? raw.trim() : "";
 			if (value === "" || ASSET_ID.test(value)) return value;
 			if (!value.startsWith(ROCAS_SCHEME))
-				throw new AssetError(`${where}: 空 / rbxassetid://<数字> / ${ROCAS_SCHEME}assets/... のどれでもない: ${raw}`);
+				throw new AssetError(`${where}: not empty, rbxassetid://<number> or ${ROCAS_SCHEME}assets/...: ${raw}`);
 
 			const relativePath = value.slice(ROCAS_SCHEME.length);
 			// byRelativePath は同じ資産に 3 通りのキーを作り、グループ相対のキーは rocas.toml の
 			// 記述順で先勝ちになる。assets/ 始まりに限れば cwd 相対のキーしか一致せず、曖昧さが消える
 			if (!relativePath.startsWith(ROCAS_PREFIX))
-				throw new AssetError(`${where}: ${ROCAS_SCHEME} のパスは ${ROCAS_PREFIX} で始まらなければならない: ${raw}`);
+				throw new AssetError(`${where}: a ${ROCAS_SCHEME} path must start with ${ROCAS_PREFIX}: ${raw}`);
 
 			const assetId = assetMap()[relativePath];
-			if (assetId === undefined) throw new AssetError(`${where}: rocas の lock に無い: ${raw}`);
+			if (assetId === undefined) throw new AssetError(`${where}: not in the rocas lock: ${raw}`);
 			return assetId;
-		},
-
-		/** プラグインへ焼く一覧（補完とサムネイル用）。rocas が無いプロジェクトでは空 */
-		entries() {
-			const rocas = loadRocas();
-			if (rocas === null || !existsSync(path.join(cwd, "rocas.toml"))) return [];
-
-			return Object.entries(rocas.buildAssetMap(rocas.loadConfig(cwd), cwd).byRelativePath)
-				.filter(([relativePath]) => relativePath.startsWith(ROCAS_PREFIX))
-				.map(([relativePath, assetId]) => ({ path: `${ROCAS_SCHEME}${relativePath}`, assetId }))
-				.sort((a, b) => a.path.localeCompare(b.path));
 		},
 	};
 }

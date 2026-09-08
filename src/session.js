@@ -12,7 +12,7 @@ async function readSchema(client) {
 	const raw = await client.get(store.SCHEMA_KEY);
 	if (raw === null)
 		throw new Error(
-			`DataStore にスキーマが無い。Studio で place を開き、rosheet プラグインを一度起動してスキーマを置く`,
+			`No schema in the DataStore. Open the place in Studio and start the rosheet plugin once so it publishes the schema`,
 		);
 	const schema = normalizeSchema(raw);
 	store.checkSheetNames(schema);
@@ -26,7 +26,7 @@ async function readHead(client) {
 async function readCommit(client, seq) {
 	if (seq === 0) return store.emptyCommit();
 	const commit = await client.get(store.commitKey(seq));
-	if (commit === null) throw new Error(`commit #${seq} が DataStore に無い`);
+	if (commit === null) throw new Error(`commit #${seq} is not in the DataStore`);
 	return commit;
 }
 
@@ -40,7 +40,7 @@ async function readDataset(client, schema, commit) {
 			// commit より後にスキーマへ足されたシートは、その commit には入っていない
 			if (blobSeq === undefined) return [sheet.name, undefined];
 			const value = await client.get(store.blobKey(blobSeq, sheet.name));
-			if (value === null) throw new Error(`${store.blobKey(blobSeq, sheet.name)} が DataStore に無い`);
+			if (value === null) throw new Error(`${store.blobKey(blobSeq, sheet.name)} is not in the DataStore`);
 			return [sheet.name, value];
 		}),
 	);
@@ -86,7 +86,7 @@ async function writePlan(client, plan) {
 
 async function revert(client, current, targetSeq, meta) {
 	const target = await readCommit(client, targetSeq);
-	if (target.seq === 0) throw new Error("commit #0 は番兵なので戻れない");
+	if (target.seq === 0) throw new Error("commit #0 is a sentinel and cannot be restored");
 	return writePlan(client, store.planRevert(current.commit, target, meta));
 }
 

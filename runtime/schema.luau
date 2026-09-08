@@ -45,7 +45,12 @@ export type Sheet = {
 	columns: { Column },
 }
 
-export type Definition = { sheets: { Sheet } }
+export type DefinitionOptions = {
+	datastore: string?,
+	scope: string?,
+}
+
+export type Definition = { sheets: { Sheet }, datastore: string?, scope: string? }
 
 local VALID_TYPES: { [string]: boolean } = {
 	string = true,
@@ -65,13 +70,13 @@ local VALID_TYPES: { [string]: boolean } = {
 		rosheet.column("rarity", "enum", { values = { "Common", "Rare" } })
 ]]
 function Schema.column(name: string, columnType: ColumnType, options: ColumnOptions?): Column
-	assert(type(name) == "string" and name ~= "", "rosheet.column: 列名が要る")
-	assert(VALID_TYPES[columnType], `rosheet.column({name}): 未対応の列の型: {tostring(columnType)}`)
+	assert(type(name) == "string" and name ~= "", "rosheet.column: a column name is required")
+	assert(VALID_TYPES[columnType], `rosheet.column({name}): unsupported column type: {tostring(columnType)}`)
 
 	local settings = options or {}
 	if columnType == "enum" then
 		local values = settings.values
-		assert(type(values) == "table" and #values > 0, `rosheet.column({name}): enum には values が要る`)
+		assert(type(values) == "table" and #values > 0, `rosheet.column({name}): enum needs values`)
 	end
 
 	return {
@@ -95,9 +100,9 @@ end
 		})
 ]]
 function Schema.sheet(name: string, options: SheetOptions): Sheet
-	assert(type(name) == "string" and name ~= "", "rosheet.sheet: シート名が要る")
-	assert(type(options) == "table" and type(options.columns) == "table", `rosheet.sheet({name}): columns が要る`)
-	assert(#options.columns > 0, `rosheet.sheet({name}): columns が空`)
+	assert(type(name) == "string" and name ~= "", "rosheet.sheet: a sheet name is required")
+	assert(type(options) == "table" and type(options.columns) == "table", `rosheet.sheet({name}): columns is required`)
+	assert(#options.columns > 0, `rosheet.sheet({name}): columns is empty`)
 
 	return {
 		name = name,
@@ -110,18 +115,37 @@ function Schema.sheet(name: string, options: SheetOptions): Sheet
 end
 
 --[[
-	スキーマ全体。この戻り値を返す ModuleScript を rosheet.toml の `schema.path` が指す。
+	スキーマ全体。この戻り値を返す ModuleScript を、プラグインが ServerStorage /
+	ReplicatedStorage から見つけて読む（`RosheetSchema` という名前が確実）。
+
+	保存先も第 2 引数で宣言する。プラグインが要る設定はこれだけで、これも place の中に置く。
+	プラグインには何も焼かないので、変えてもプラグインは入れ直さなくてよい。
+
+		rosheet.defineSchema({ ... }, { datastore = "rosheet", scope = "master" })
+
+	CLI は同じ値を rosheet.toml の `project.datastore` / `project.scope` で読む。
+	既定から変えるなら両方に書く。
 ]]
-function Schema.defineSchema(sheets: { Sheet }): Definition
-	assert(type(sheets) == "table" and #sheets > 0, "rosheet.defineSchema: シートが空")
+function Schema.defineSchema(sheets: { Sheet }, options: DefinitionOptions?): Definition
+	assert(type(sheets) == "table" and #sheets > 0, "rosheet.defineSchema: sheets is empty")
+
+	local settings = options or {}
+	assert(
+		settings.datastore == nil or (type(settings.datastore) == "string" and settings.datastore ~= ""),
+		"rosheet.defineSchema: datastore must be a non-empty string"
+	)
+	assert(
+		settings.scope == nil or (type(settings.scope) == "string" and settings.scope ~= ""),
+		"rosheet.defineSchema: scope must be a non-empty string"
+	)
 
 	local seen: { [string]: boolean } = {}
 	for _, sheet in sheets do
-		assert(not seen[sheet.name], `rosheet.defineSchema: シート名が重複している: {sheet.name}`)
+		assert(not seen[sheet.name], `rosheet.defineSchema: duplicate sheet name: {sheet.name}`)
 		seen[sheet.name] = true
 	end
 
-	return table.freeze({ sheets = sheets })
+	return table.freeze({ sheets = sheets, datastore = settings.datastore, scope = settings.scope })
 end
 
 return table.freeze(Schema)
