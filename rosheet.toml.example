@@ -1,0 +1,33 @@
+# rosheet - Roblox master data (https://github.com/Plumvery/rosheet)
+#
+# 編集の正は Studio プラグイン + DataStore、出荷の正はここで指定した生成物。
+#
+# 初回セットアップ:
+#   1. スキーマを宣言する ModuleScript を書き、place の中に置く（schema.path が指す場所）
+#   2. npx rosheet plugin        # Studio の Plugins フォルダにプラグインを置く
+#   3. Studio で place を開く    # File > Experience Settings > Security で
+#                                # "Enable Studio Access to API Services" を入れておく
+#   4. プラグインでシートを編集して Apply
+#   5. npx rosheet pull          # 生成物を書き出してコミットする
+
+[project]
+# Open Cloud から DataStore を読むのに使う。Studio プラグイン側は place 自身の universe を
+# 見るので、この値はプラグインには要らない（CLI の pull / check / import 専用）
+universe = 0
+
+# DataStore 名。プレイヤーのデータと絶対にぶつからない名前にする
+datastore = "rosheet"
+
+# scope = "master"
+
+[schema]
+# プラグインが require するスキーマモジュールの place 内での場所。
+# ReplicatedStorage には置かない（本番のクライアントにまで配信されるため）
+path = "ServerStorage.RosheetSchema"
+
+[output]
+# "luau" なら *.luau（--!strict）、"roblox-ts" なら *.luau + *.d.ts
+format = "luau"
+
+# 生成物の置き場。git 管理に入れて、PR の diff で値の変更が見えるようにする
+dir = "src/shared/config/generated"

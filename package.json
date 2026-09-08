@@ -1,0 +1,48 @@
+{
+	"name": "@plumvery/rosheet",
+	"version": "0.1.0",
+	"description": "Roblox master data: define the schema in code, edit it in a Studio spreadsheet, bake it into the place",
+	"main": "src/index.js",
+	"bin": {
+		"rosheet": "bin/rosheet.js"
+	},
+	"scripts": {
+		"test": "node --test test/test.js",
+		"prepublishOnly": "npm test"
+	},
+	"author": "Plumvery",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Plumvery/rosheet.git"
+	},
+	"bugs": {
+		"url": "https://github.com/Plumvery/rosheet/issues"
+	},
+	"homepage": "https://github.com/Plumvery/rosheet#readme",
+	"keywords": [
+		"rosheet",
+		"roblox",
+		"master-data",
+		"datastore",
+		"studio-plugin",
+		"luau",
+		"roblox-ts"
+	],
+	"license": "MIT",
+	"publishConfig": {
+		"access": "restricted"
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"files": [
+		"src/",
+		"bin/",
+		"plugin/",
+		"runtime/",
+		"rosheet.toml.example",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	]
+}
