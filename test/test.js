@@ -244,3 +244,75 @@ test("生成の直前に asset を解決し、解決できない値は落とす"
 	assert.strictEqual(real.resolve("rbxassetid://5", "x"), "rbxassetid://5");
 	assert.throws(() => real.resolve("rocas://images/a.png", "x"), AssetError);
 });
+
+// --- Release に添付するインストーラー ---
+
+const {
+	MACOS_INSTALLER_NAME,
+	PAYLOAD_MARKER,
+	buildMacInstaller,
+	buildWindowsInstaller,
+	createZip,
+} = require("../scripts/build-installers");
+const { DEFAULT_PLUGIN_FILE } = require("../src/studio-plugin");
+
+// 76 桁で折り返すので、1 行に収まらない長さを渡す
+const INSTALLER_PAYLOAD = Buffer.from(Array.from({ length: 300 }, (_, index) => (index * 7) % 256));
+
+// インストーラーは自分自身をマーカー行で切って後ろを decode する。マーカーだけの行が
+// 2 本あると、切る位置が変わって壊れる
+function extractPayload(script) {
+	const lines = script.split(/\r?\n/);
+	assert.strictEqual(lines.filter((line) => line === PAYLOAD_MARKER).length, 1, "マーカーだけの行は 1 本");
+	return Buffer.from(lines.slice(lines.indexOf(PAYLOAD_MARKER) + 1).join(""), "base64");
+}
+
+test("Windows のインストーラーは CRLF で、Plugins フォルダへ書く", () => {
+	const installer = buildWindowsInstaller(INSTALLER_PAYLOAD);
+
+	assert(installer.startsWith("@echo off\r\n"));
+	// cmd.exe の括弧ブロックは LF だけだと崩れることがある
+	assert.deepStrictEqual(
+		installer.split("\n").filter((line) => line !== "" && !line.endsWith("\r")),
+		[],
+	);
+	assert(installer.includes("Join-Path $env:LOCALAPPDATA 'Roblox\\Plugins'"));
+	// `rosheet plugin` と同じファイル名。変えると同じプラグインが 2 つ読み込まれる
+	assert(installer.includes(`Join-Path $dir '${DEFAULT_PLUGIN_FILE}'`));
+	// マーカーの手前で抜けないと、cmd が base64 をコマンドとして読む
+	assert(installer.indexOf("\r\nexit /b\r\n") < installer.lastIndexOf(PAYLOAD_MARKER));
+	assert(extractPayload(installer).equals(INSTALLER_PAYLOAD));
+});
+
+test("macOS のインストーラーは LF で、Documents の Plugins フォルダへ書く", () => {
+	const installer = buildMacInstaller(INSTALLER_PAYLOAD);
+
+	assert(installer.startsWith("#!/bin/bash\n"));
+	assert(!installer.includes("\r"));
+	assert(installer.includes('dir="$HOME/Documents/Roblox/Plugins"'));
+	assert(installer.includes(`file="$dir/${DEFAULT_PLUGIN_FILE}"`));
+	// awk のパターンは行頭行末で留める。留めないと、awk を呼ぶ行そのものに当たる
+	assert(installer.includes(`/^${PAYLOAD_MARKER}$/`));
+	assert(installer.indexOf("\nexit 0\n") < installer.lastIndexOf(PAYLOAD_MARKER));
+	assert(extractPayload(installer).equals(INSTALLER_PAYLOAD));
+});
+
+test("mac 版を包む zip は実行ビットを残す", () => {
+	const installer = Buffer.from(buildMacInstaller(INSTALLER_PAYLOAD), "utf8");
+	const zip = createZip([{ name: MACOS_INSTALLER_NAME, data: installer, mode: 0o755 }]);
+
+	const eocd = zip.length - 22;
+	assert.strictEqual(zip.readUInt32LE(eocd), 0x06054b50);
+	assert.strictEqual(zip.readUInt16LE(eocd + 8), 1);
+
+	const central = zip.readUInt32LE(eocd + 16);
+	assert.strictEqual(zip.readUInt32LE(central), 0x02014b50);
+	// version made by の上位バイトが 3 (UNIX) でないと、展開側がモードを見ない
+	assert.strictEqual(zip.readUInt16LE(central + 4) >>> 8, 3);
+	assert.strictEqual(zip.readUInt32LE(central + 38) >>> 16, 0o100755);
+
+	const nameLength = zip.readUInt16LE(central + 28);
+	assert.strictEqual(zip.subarray(central + 46, central + 46 + nameLength).toString(), MACOS_INSTALLER_NAME);
+	// 無圧縮なので、格納したバイト列がそのまま入っている
+	assert(zip.includes(installer));
+});

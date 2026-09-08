@@ -73,6 +73,20 @@ Studio の Plugins フォルダに `rosheet.rbxmx` が置かれる。Studio 側�
 
 **プラグインには何も焼き込まない。** スキーマも、保存先の DataStore 名も、rocas のアセット一覧も、プラグインが place の中から読む —— `ServerStorage` と `ReplicatedStorage` を走査して、Rojo が同期したモジュールを見つけ、`DescendantAdded` / Source の変化で追い直す。スキーマを直しても、アセットを足しても、プラグインは入れ直さなくてよい。
 
+#### npm を使わずに入れる
+
+値を触るだけのプランナーやアーティストに Node と npm を求めるのは重い。[リリース](https://github.com/Plumvery/rosheet/releases/latest)にダブルクリックで入るインストーラーを添付してある:
+
+| ファイル | OS | 開き方 |
+|---|---|---|
+| `rosheet-plugin-installer-windows.cmd` | Windows | ダブルクリック。発行元を確認できないと出るので **実行** を選ぶ |
+| `rosheet-plugin-installer-macos.zip` | macOS | 展開して、中の `.command` を **右クリック → 開く → 開く**。ダブルクリックだけだと拒まれる（署名の無いダウンロード済みスクリプトを macOS が止めるため） |
+| `rosheet.rbxmx` | 共通 | プラグイン本体。自分で Plugins フォルダへ置きたいとき用 |
+
+どちらのインストーラーも `.rbxmx` を base64 で中に抱えていて、`rosheet plugin` と同じ場所・同じファイル名で置く（Windows は `%LOCALAPPDATA%\Roblox\Plugins`、macOS は `~/Documents/Roblox/Plugins`）。**インストール時に通信しない**ので、プロキシの向こうでも URL が腐っても動く。置いたら Studio を再起動する。
+
+プラグインには何も焼き込んでいないので、リリースから取った 1 本はプラグイン自体が変わるまで正しいままになる。
+
 CLI 側の設定はこれとは別に要る:
 
 ```bash
