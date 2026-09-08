@@ -168,6 +168,27 @@ for _, gun in Guns.rows do ... end
 
 まだ無いもの: 列幅の変更、並べ替えと絞り込み、複数セルの範囲選択、古い blob の掃除（`rosheet gc`）。
 
+## 次にやること
+
+### 1. rocas のアセット一覧を Studio 側から読む
+
+今は `rosheet plugin` が rocas の lock を読んで一覧をプラグインへ焼いている（[src/studio-plugin.js](src/studio-plugin.js) の `assetsModule`）。焼いた時点の写しなので、アセットを足したら打ち直しが要る。
+
+**rocas のプラグインはファイルシステムを読んでいない。** 確認した実装はこうだった:
+
+- `findManifest()` が `ReplicatedStorage:GetDescendants()` を走査して、Rojo が同期した manifest の ModuleScript を見つける（`rocas manifest` が `src/shared/RocasManifest.luau` に書くもの）
+- `ReplicatedStorage.DescendantAdded` / `DescendantRemoving` を購読して、Rojo が同期し直したら読み直す
+
+つまり「ファイルを読む」ではなく「Rojo が同期したモジュールを読み、変化を追う」。HTTP も権限も要らず、Rojo が動いていれば即座に反映される。
+
+rosheet も同じ形にできる。**manifest の各要素は `sourcePath` を持ち、その値は cwd 相対のパス**（`assets/images/maps/SciFi.png`）で、`rocas://` が使う形とそのまま一致する（uploaded モードでも入る。rocas の `buildStudioPluginManifest` で確認）。なので group とディレクトリの対応を別途持つ必要はなく、manifest だけで `rocas://assets/...` を解決できる。
+
+やること: プラグインが manifest モジュールを走査して見つけ、`DescendantAdded` / `DescendantRemoving` で読み直す。焼いた一覧は manifest が無いときのフォールバックとして残す。
+
+### 2. CLI のメッセージを英語にする
+
+プラグイン側の文言は英語に揃えたが、CLI（`src/*.js` と `bin/rosheet.js`）はまだ日本語。同じツールの中で分かれているのはよくないので揃える。コード中のコメントは日本語のままでよい。
+
 ## ライセンス
 
 MIT
