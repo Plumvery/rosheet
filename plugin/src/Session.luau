@@ -66,7 +66,7 @@ function Session.checkSheetNames(schema: Schema.Normalized)
 	for _, sheet in schema.sheets do
 		local length = #Session.blobKey(0, sheet.name)
 		if length > MAX_KEY_LENGTH then
-			error(`シート名が長すぎる（DataStore のキーが {MAX_KEY_LENGTH} 文字を超える）: {sheet.name}`, 0)
+			error(`Sheet name is too long (the DataStore key would exceed {MAX_KEY_LENGTH} characters): {sheet.name}`, 0)
 		end
 	end
 end
@@ -121,7 +121,7 @@ local function readDataset(
 				return false, value
 			end
 			if value == nil then
-				return false, `{Session.blobKey(blobSeq, sheet.name)} が無い`
+				return false, `{Session.blobKey(blobSeq, sheet.name)} is missing`
 			end
 			raw[sheet.name] = value
 		end
@@ -169,7 +169,7 @@ function Session.readCurrent(backend: Backend, schema: Schema.Normalized): (bool
 		seq -= 1
 	end
 
-	return false, `head が指す commit #{head} が見つからない`
+	return false, `Cannot find commit #{head} that head points at`
 end
 
 function Session.readLog(backend: Backend): (boolean, any)
@@ -305,7 +305,7 @@ function Session.revert(
 	meta: { at: string, by: string, note: string? }
 ): (boolean, any)
 	if target.seq == 0 then
-		return false, "commit #0 は番兵なので戻れない"
+		return false, "Commit #0 is a sentinel and cannot be restored"
 	end
 
 	local reserved, seq = reserve(backend, state.head)

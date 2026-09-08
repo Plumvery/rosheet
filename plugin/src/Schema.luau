@@ -66,78 +66,82 @@ function Schema.checkValue(column: Column, value: any): string?
 	local columnType = column.type
 
 	if columnType == "string" or columnType == "text" then
-		return if type(value) == "string" then nil else `文字列でない`
+		return if type(value) == "string" then nil else "not a string"
 	elseif columnType == "number" or columnType == "integer" then
 		if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
-			return "有限の数値でない"
+			return "not a finite number"
 		end
 		if columnType == "integer" and value % 1 ~= 0 then
-			return `整数でない: {value}`
+			return `not an integer: {value}`
 		end
 		if column.min ~= nil and value < column.min then
-			return `min {column.min} を下回る: {value}`
+			return `below min {column.min}: {value}`
 		end
 		if column.max ~= nil and value > column.max then
-			return `max {column.max} を超える: {value}`
+			return `above max {column.max}: {value}`
 		end
 		return nil
 	elseif columnType == "boolean" then
-		return if type(value) == "boolean" then nil else "真偽値でない"
+		return if type(value) == "boolean" then nil else "not a boolean"
 	elseif columnType == "enum" then
 		if type(value) ~= "string" then
-			return "文字列でない"
+			return "not a string"
 		end
 		for _, candidate in column.values :: { string } do
 			if candidate == value then
 				return nil
 			end
 		end
-		return `候補に無い値: {value}`
+		return `not one of the allowed values: {value}`
 	elseif columnType == "asset" then
 		if type(value) ~= "string" then
-			return "文字列でない"
+			return "not a string"
 		end
-		-- 空を許すのは「まだ差し替えていない」を表せないと嘘の ID を入れる羽目になるため
+		-- 空を許すのは「まだ差し替えていない」を表せないと嘘の ID を入れる羽目になるため。
+		-- rocas:// は保存先にこの形のまま置き、生成のときに実 ID へ解決する（src/assets.js）
 		if value == "" or string.match(value, "^rbxassetid://%d+$") ~= nil then
 			return nil
 		end
-		return "空か rbxassetid://<数字> でない"
+		if string.match(value, "^rocas://assets/%S+$") ~= nil then
+			return nil
+		end
+		return "not empty, rbxassetid://<number> or rocas://assets/..."
 	elseif columnType == "color" then
 		if type(value) ~= "string" then
-			return "文字列でない"
+			return "not a string"
 		end
-		return if string.match(value, "^#%x%x%x%x%x%x$") ~= nil then nil else "#RRGGBB でない"
+		return if string.match(value, "^#%x%x%x%x%x%x$") ~= nil then nil else "not #RRGGBB"
 	end
 
-	return `未対応の列の型: {columnType}`
+	return `unsupported column type: {columnType}`
 end
 
 local function normalizeColumn(raw: any, where: string): Column
 	if type(raw) ~= "table" then
-		fail(where, "列はテーブルでなければならない")
+		fail(where, "a column must be a table")
 	end
 	if type(raw.name) ~= "string" or string.match(raw.name, IDENTIFIER) == nil then
-		fail(where, `列名が識別子として使えない: {tostring(raw.name)}`)
+		fail(where, `column name is not a usable identifier: {tostring(raw.name)}`)
 	end
 
 	local at = `{where}.{raw.name}`
 	if not COLUMN_TYPES[raw.type] then
-		fail(at, `未対応の列の型: {tostring(raw.type)}`)
+		fail(at, `unsupported column type: {tostring(raw.type)}`)
 	end
 
 	local values: { string }? = nil
 	if raw.type == "enum" then
 		if type(raw.values) ~= "table" or #raw.values == 0 then
-			fail(at, "enum には values が要る")
+			fail(at, "enum needs values")
 		end
 		values = table.clone(raw.values)
 		local seen: { [string]: boolean } = {}
 		for _, value in values :: { string } do
 			if type(value) ~= "string" then
-				fail(at, "enum の values は文字列だけ")
+				fail(at, "enum values must all be strings")
 			end
 			if seen[value] then
-				fail(at, `enum の values が重複している: {value}`)
+				fail(at, `duplicate enum value: {value}`)
 			end
 			seen[value] = true
 		end
@@ -155,12 +159,12 @@ local function normalizeColumn(raw: any, where: string): Column
 	}
 
 	if column.min ~= nil and column.max ~= nil and column.min > column.max then
-		fail(at, `min が max を超えている: {column.min} > {column.max}`)
+		fail(at, `min is greater than max: {column.min} > {column.max}`)
 	end
 
 	local problem = Schema.checkValue(column, column.default)
 	if problem ~= nil then
-		fail(at, `default が列の型に合わない: {problem}`)
+		fail(at, `default does not match the column type: {problem}`)
 	end
 
 	return column
@@ -168,19 +172,19 @@ end
 
 local function normalizeSheet(raw: any, where: string): Sheet
 	if type(raw) ~= "table" then
-		fail(where, "シートはテーブルでなければならない")
+		fail(where, "a sheet must be a table")
 	end
 	if type(raw.name) ~= "string" or string.match(raw.name, IDENTIFIER) == nil then
-		fail(where, `シート名が識別子として使えない: {tostring(raw.name)}`)
+		fail(where, `sheet name is not a usable identifier: {tostring(raw.name)}`)
 	end
 
 	local at = `sheet {raw.name}`
 	local kind = if raw.kind == nil then "table" else raw.kind
 	if kind ~= "table" and kind ~= "scalars" then
-		fail(at, `未対応のシートの種別: {tostring(kind)}`)
+		fail(at, `unsupported sheet kind: {tostring(kind)}`)
 	end
 	if type(raw.columns) ~= "table" or #raw.columns == 0 then
-		fail(at, "columns が空")
+		fail(at, "columns is empty")
 	end
 
 	local columns: { Column } = {}
@@ -188,7 +192,7 @@ local function normalizeSheet(raw: any, where: string): Sheet
 	for index, rawColumn in raw.columns do
 		local column = normalizeColumn(rawColumn, at)
 		if seen[column.name] then
-			fail(at, `列名が重複している: {column.name}`)
+			fail(at, `duplicate column name: {column.name}`)
 		end
 		seen[column.name] = true
 		columns[index] = column
@@ -204,10 +208,10 @@ local function normalizeSheet(raw: any, where: string): Sheet
 			end
 		end
 		if found == nil then
-			fail(at, `key に指定された列が無い: {key}`)
+			fail(at, `no such column for key: {key}`)
 		end
 		if (found :: Column).type ~= "string" then
-			fail(at, `key の列は string でなければならない: {key} は {(found :: Column).type}`)
+			fail(at, `the key column must be a string: {key} is {(found :: Column).type}`)
 		end
 	end
 
@@ -227,10 +231,10 @@ end
 ]]
 function Schema.normalize(definition: any): Normalized
 	if type(definition) ~= "table" or type(definition.sheets) ~= "table" then
-		fail("schema", "defineSchema の戻り値でない")
+		fail("schema", "not the return value of defineSchema")
 	end
 	if #definition.sheets == 0 then
-		fail("schema", "sheets が空")
+		fail("schema", "sheets is empty")
 	end
 
 	local sheets: { Sheet } = {}
@@ -238,7 +242,7 @@ function Schema.normalize(definition: any): Normalized
 	for index, rawSheet in definition.sheets do
 		local sheet = normalizeSheet(rawSheet, `sheets[{index}]`)
 		if seen[sheet.name] then
-			fail("schema", `シート名が重複している: {sheet.name}`)
+			fail("schema", `duplicate sheet name: {sheet.name}`)
 		end
 		seen[sheet.name] = true
 		sheets[index] = sheet

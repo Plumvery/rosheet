@@ -12,19 +12,39 @@ local Grid = require(script.Parent.Grid)
 local Live = require(script.Parent.Live)
 local Theme = require(script.Parent.Theme)
 local Config = require(script.Parent.Config)
+local Assets = require(script.Parent.Assets)
 
+local Players = game:GetService("Players")
 local StudioService = game:GetService("StudioService")
+
+local HISTORY_BUTTON_WIDTH = 72
 
 local App = {}
 App.__index = App
 
 export type App = typeof(setmetatable({} :: any, App))
 
-local function author(): string
-	local ok, name = pcall(function()
+--[[
+	履歴に残す「誰が」。Studio のログインユーザー名を引き、引けなければ UserId を残す。
+	GetNameFromUserIdAsync は待つので、開いたときに一度だけ引いて覚えておく。
+]]
+local author = "studio"
+
+local function resolveAuthor()
+	local gotId, userId = pcall(function()
 		return StudioService:GetUserId()
 	end)
-	return if ok then `userid:{name}` else "studio"
+	if not gotId or type(userId) ~= "number" or userId <= 0 then
+		return
+	end
+
+	author = `userid:{userId}`
+	local gotName, name = pcall(function()
+		return Players:GetNameFromUserIdAsync(userId)
+	end)
+	if gotName and type(name) == "string" and name ~= "" then
+		author = name
+	end
 end
 
 --[[ "ServerStorage.RosheetSchema" のような文字列を実体まで辿る ]]
@@ -33,7 +53,7 @@ local function resolvePath(path: string): (Instance?, string?)
 	for segment in string.gmatch(path, "[^%.]+") do
 		local child = current:FindFirstChild(segment)
 		if child == nil then
-			return nil, `{path}: {current:GetFullName()} に {segment} が無い`
+			return nil, `{path}: {current:GetFullName()} has no {segment}`
 		end
 		current = child
 	end
@@ -44,15 +64,15 @@ local function loadSchema(): (Schema.Normalized?, string?)
 	local instance, problem = resolvePath(Config.schemaPath)
 	if instance == nil then
 		-- 最初に必ずここで詰まるので、次に何をすればよいかまで書く
-		return nil, `{problem}。スキーマを宣言した ModuleScript を place に置くか、rosheet.toml の schema.path を直す`
+		return nil, `{problem}. Put the schema ModuleScript in the place, or fix schema.path in rosheet.toml`
 	end
 	if not instance:IsA("ModuleScript") then
-		return nil, `{Config.schemaPath} は ModuleScript でない`
+		return nil, `{Config.schemaPath} is not a ModuleScript`
 	end
 
 	local required, definition = pcall(require, instance)
 	if not required then
-		return nil, `スキーマの require が失敗した: {tostring(definition)}`
+		return nil, `require of the schema failed: {tostring(definition)}`
 	end
 
 	local normalized, schema = pcall(Schema.normalize, definition)
@@ -88,6 +108,15 @@ local function button(parent: Instance, text: string, width: number): TextButton
 	return instance
 end
 
+--[[ 押せないボタンは見た目でも押せないと分かる必要がある ]]
+local function setEnabled(instance: TextButton, enabled: boolean)
+	local colors = Theme.palette()
+	instance.Active = enabled
+	instance.AutoButtonColor = enabled
+	instance.TextColor3 = if enabled then colors.text else colors.dimText
+	instance.BackgroundTransparency = if enabled then 0 else 0.55
+end
+
 -- ============================================================
 
 function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
@@ -111,10 +140,14 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		showHistory = false,
 		log = { entries = {} },
 		grid = nil :: any,
+		buttons = {} :: { TextButton },
 		busy = false,
 	}, App)
 
 	self:_buildChrome()
+	self.grid:setAssets(Assets)
+	-- 名前を引くのは待つので、画面を出してから別スレッドで
+	task.spawn(resolveAuthor)
 	self:reload()
 	return self
 end
@@ -129,51 +162,50 @@ function App._buildChrome(self: App)
 	toolbar.Size = UDim2.new(1, 0, 0, Theme.TOOLBAR_HEIGHT)
 	toolbar.Parent = self.root
 
+	-- 左の並びだけを UIListLayout に入れる。History は右端に置きたいので、レイアウトの外に出す
+	local left = Instance.new("Frame")
+	left.Name = "Left"
+	left.BackgroundTransparency = 1
+	left.Size = UDim2.new(1, -HISTORY_BUTTON_WIDTH - Theme.PADDING * 2, 1, 0)
+	left.Parent = toolbar
+
 	local layout = Instance.new("UIListLayout")
 	layout.FillDirection = Enum.FillDirection.Horizontal
 	layout.VerticalAlignment = Enum.VerticalAlignment.Center
 	layout.Padding = UDim.new(0, 4)
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Parent = toolbar
+	layout.Parent = left
 
 	local padding = Instance.new("UIPadding")
 	padding.PaddingLeft = UDim.new(0, Theme.PADDING)
-	padding.Parent = toolbar
+	padding.Parent = left
 
-	self.applyButton = button(toolbar, "Apply", 92)
+	self.applyButton = button(left, "Apply", 92)
 	self.applyButton.LayoutOrder = 1
 	self.applyButton.Activated:Connect(function()
 		self:apply()
 	end)
 
-	self.discardButton = button(toolbar, "編集を捨てる", 96)
+	self.discardButton = button(left, "Discard", 80)
 	self.discardButton.LayoutOrder = 2
 	self.discardButton.Activated:Connect(function()
 		self:discard()
 	end)
 
-	self.addButton = button(toolbar, "行を追加", 76)
+	self.addButton = button(left, "Add row", 76)
 	self.addButton.LayoutOrder = 3
 	self.addButton.Activated:Connect(function()
 		self:addRow()
 	end)
 
-	self.deleteButton = button(toolbar, "行を削除", 76)
+	self.deleteButton = button(left, "Delete row", 88)
 	self.deleteButton.LayoutOrder = 4
 	self.deleteButton.Activated:Connect(function()
 		self:deleteRow()
 	end)
 
-	self.historyButton = button(toolbar, "履歴", 60)
-	self.historyButton.LayoutOrder = 5
-	self.historyButton.Activated:Connect(function()
-		self.showHistory = not self.showHistory
-		self:_refreshHistory()
-		self:_refreshToolbar()
-	end)
-
-	self.reloadButton = button(toolbar, "読み直す", 76)
-	self.reloadButton.LayoutOrder = 6
+	self.reloadButton = button(left, "Reload", 72)
+	self.reloadButton.LayoutOrder = 5
 	self.reloadButton.Activated:Connect(function()
 		self:reload()
 	end)
@@ -185,9 +217,26 @@ function App._buildChrome(self: App)
 	self.status.TextColor3 = colors.dimText
 	self.status.TextXAlignment = Enum.TextXAlignment.Left
 	self.status.Size = UDim2.fromOffset(420, Theme.TOOLBAR_HEIGHT)
-	self.status.LayoutOrder = 7
+	self.status.LayoutOrder = 6
 	self.status.Text = ""
-	self.status.Parent = toolbar
+	self.status.Parent = left
+
+	-- 履歴は右から開くので、開閉も右端に置く
+	self.historyButton = button(toolbar, "History", HISTORY_BUTTON_WIDTH)
+	self.historyButton.AnchorPoint = Vector2.new(1, 0.5)
+	self.historyButton.Position = UDim2.new(1, -Theme.PADDING, 0.5, 0)
+	self.historyButton.Activated:Connect(function()
+		self:toggleHistory()
+	end)
+
+	self.buttons = {
+		self.applyButton,
+		self.discardButton,
+		self.addButton,
+		self.deleteButton,
+		self.reloadButton,
+		self.historyButton,
+	}
 
 	local tabs = Instance.new("ScrollingFrame")
 	tabs.Name = "Tabs"
@@ -292,14 +341,14 @@ function App.reload(self: App)
 			-- 公開していない place や API を入れていない環境でも触れるようにしておく。
 			-- ここで諦めると「何も出ないプラグイン」になり、原因も分からない
 			self.backend = Store.pluginSettings(self.plugin, Config.datastore)
-			self:_say(`DataStore を使えないのでローカル保存に切り替えた: {why}`, true)
+			self:_say(`Falling back to local storage: {why}`, true)
 		end
 	end
 	local backend = self.backend :: Store.Backend
 
 	local published, failure = Session.publishSchema(backend, schema)
 	if not published then
-		self:_say(`スキーマを保存できない: {tostring(failure)}`, true)
+		self:_say(`Could not publish the schema: {tostring(failure)}`, true)
 		return
 	end
 
@@ -428,30 +477,132 @@ function App._refreshToolbar(self: App)
 	local sheet = self:_sheet()
 	local state = self.state :: Session.State
 
-	self.applyButton.Text = if #changed == 0 then "Apply" else `Apply ({#changed})`
-	self.applyButton.AutoButtonColor = #changed > 0
-	self.discardButton.Visible = #changed > 0
+	local idle = not self.busy
+	local dirty = #changed > 0
+
+	self.applyButton.Text = if self.busy then "Applying..." elseif dirty then `Apply ({#changed})` else "Apply"
+	setEnabled(self.applyButton, idle and dirty)
+	-- Discard は常に出す。変更があるときだけ現れると、押せる場所が動いて狙いにくい
+	setEnabled(self.discardButton, idle and dirty)
 
 	local canAddRows = sheet.kind == "table" and sheet.rows == "open"
-	self.addButton.Visible = canAddRows
-	self.deleteButton.Visible = canAddRows and self.grid:selectedRow() ~= nil
-	self.historyButton.Text = if self.showHistory then "履歴 ◀" else "履歴"
+	setEnabled(self.addButton, idle and canAddRows)
+	setEnabled(self.deleteButton, idle and canAddRows and self.grid:selectedRow() ~= nil)
+	setEnabled(self.historyButton, idle)
+	setEnabled(self.reloadButton, idle)
+	self.historyButton.Text = if self.showHistory then "History \u{25B8}" else "History"
 
 	local backend = self.backend :: Store.Backend
-	local where = if Live.isPlaying() then " · プレイ中" else ""
-	self.status.Text = `#{state.head} · {backend.label}{where}`
+	local where = if Live.isPlaying() then " \u{00B7} playing" else ""
+	self.status.Text = `#{state.head} \u{00B7} {backend.label}{where}`
+end
+
+--[[ Apply の最中は表もツールバーも触らせない。触れると送っている内容と画面が食い違う ]]
+function App._setBusy(self: App, busy: boolean)
+	self.busy = busy
+	self.grid:setLocked(busy)
+	self:_refreshToolbar()
+end
+
+--[[
+	取り消せない操作の前に挟む。背後を覆うので、開いている間は表もツールバーも触れない。
+]]
+function App._confirm(self: App, message: string, confirmLabel: string, onConfirm: () -> ())
+	local colors = Theme.palette()
+
+	local overlay = Instance.new("TextButton")
+	overlay.BackgroundColor3 = colors.background
+	overlay.BackgroundTransparency = 0.4
+	overlay.BorderSizePixel = 0
+	overlay.Size = UDim2.fromScale(1, 1)
+	overlay.Text = ""
+	overlay.AutoButtonColor = false
+	overlay.ZIndex = 40
+	overlay.Parent = self.root
+
+	local box = Instance.new("Frame")
+	box.BackgroundColor3 = colors.surface
+	box.BorderSizePixel = 0
+	box.AnchorPoint = Vector2.new(0.5, 0.5)
+	box.Position = UDim2.fromScale(0.5, 0.5)
+	box.Size = UDim2.fromOffset(380, 116)
+	box.ZIndex = 41
+	box.Parent = overlay
+
+	local outline = Instance.new("UIStroke")
+	outline.Color = colors.header
+	outline.Thickness = 1
+	outline.Parent = box
+
+	local text = Instance.new("TextLabel")
+	text.BackgroundTransparency = 1
+	text.Position = UDim2.fromOffset(16, 16)
+	text.Size = UDim2.new(1, -32, 0, 56)
+	text.Font = Theme.FONT
+	text.TextSize = Theme.TEXT_SIZE
+	text.TextColor3 = colors.text
+	text.TextXAlignment = Enum.TextXAlignment.Left
+	text.TextYAlignment = Enum.TextYAlignment.Top
+	text.TextWrapped = true
+	text.Text = message
+	text.ZIndex = 42
+	text.Parent = box
+
+	local function close()
+		overlay:Destroy()
+	end
+
+	local cancel = button(box, "Cancel", 88)
+	cancel.AnchorPoint = Vector2.new(1, 1)
+	cancel.Position = UDim2.new(1, -104, 1, -14)
+	cancel.ZIndex = 42
+	cancel.Activated:Connect(close)
+
+	local confirm = button(box, confirmLabel, 88)
+	confirm.AnchorPoint = Vector2.new(1, 1)
+	confirm.Position = UDim2.new(1, -12, 1, -14)
+	confirm.BackgroundColor3 = colors.danger
+	confirm.TextColor3 = Color3.new(1, 1, 1)
+	confirm.ZIndex = 42
+	confirm.Activated:Connect(function()
+		close()
+		onConfirm()
+	end)
+
+	-- 覆いを押したら取り消し。閉じ方が分からなくなるのを避ける
+	overlay.Activated:Connect(close)
 end
 
 function App.discard(self: App)
-	local schema = self.schema :: Schema.Normalized
-	self.draft = Rows.cloneDataset(schema, (self.state :: Session.State).dataset)
-	self:_refreshGrid()
+	if self.busy then
+		return
+	end
+	local changed = self:_changedSheets()
+	if #changed == 0 then
+		return
+	end
+
+	-- 捨てた編集は戻せない（Apply していないので履歴にも無い）。確認を挟む
+	self:_confirm(`Discard unapplied edits in {table.concat(changed, ", ")}?`, "Discard", function()
+		local schema = self.schema :: Schema.Normalized
+		self.draft = Rows.cloneDataset(schema, (self.state :: Session.State).dataset)
+		self:_refreshGrid()
+		self:_refreshToolbar()
+	end)
+end
+
+function App.toggleHistory(self: App)
+	if self.busy then
+		return
+	end
+	self.showHistory = not self.showHistory
+	self:_refreshHistory()
 	self:_refreshToolbar()
 end
 
 function App.addRow(self: App)
 	local sheet = self:_sheet()
-	if sheet.kind ~= "table" or sheet.rows ~= "open" then
+	if self.busy or sheet.kind ~= "table" or sheet.rows ~= "open" then
 		return
 	end
 
@@ -484,7 +635,7 @@ end
 function App.deleteRow(self: App)
 	local sheet = self:_sheet()
 	local index = self.grid:selectedRow()
-	if sheet.kind ~= "table" or sheet.rows ~= "open" or index == nil then
+	if self.busy or sheet.kind ~= "table" or sheet.rows ~= "open" or index == nil then
 		return
 	end
 
@@ -505,30 +656,27 @@ function App.apply(self: App)
 	end
 	local changed = self:_changedSheets()
 	if #changed == 0 then
-		self:_say("変わっていないので Apply しなかった", false)
 		return
 	end
 
-	self.busy = true
-	self.applyButton.Text = "Apply 中…"
+	self:_setBusy(true)
 
 	task.spawn(function()
 		local backend = self.backend :: Store.Backend
 		local schema = self.schema :: Schema.Normalized
 		local ok, result =
-			Session.apply(backend, schema, self.state :: Session.State, self.draft :: any, { at = DateTime.now():ToIsoDate(), by = author(), note = "" })
+			Session.apply(backend, schema, self.state :: Session.State, self.draft :: any, { at = DateTime.now():ToIsoDate(), by = author, note = "" })
 
-		self.busy = false
+		self:_setBusy(false)
 		if not ok then
-			self:_say(`Apply できなかった: {tostring(result)}`, true)
-			self:_refreshToolbar()
+			self:_say(`Apply failed: {tostring(result)}`, true)
 			return
 		end
 
 		local commit = result :: Session.Commit
 		Live.publish(schema, self.draft :: any, commit.seq)
-		self:_say(`#{commit.seq} を Apply した: {table.concat(changed, ", ")}`, false)
 		self:reload()
+		self:_say(`Applied #{commit.seq}: {table.concat(changed, ", ")}`, false)
 	end)
 end
 
@@ -577,10 +725,11 @@ function App._refreshHistory(self: App)
 		detail.TextXAlignment = Enum.TextXAlignment.Left
 		detail.TextYAlignment = Enum.TextYAlignment.Top
 		detail.TextWrapped = true
-		detail.Text = `{entry.at or "?"}\n{table.concat(entry.changed, ", ")}`
+		local who = if entry.by ~= nil and entry.by ~= "" then entry.by else "?"
+		detail.Text = `{entry.at or "?"}  ·  {who}\n{table.concat(entry.changed, ", ")}`
 		detail.Parent = card
 
-		local restore = button(card, "戻す", 52)
+		local restore = button(card, "Restore", 52)
 		restore.AnchorPoint = Vector2.new(1, 0.5)
 		restore.Position = UDim2.new(1, -6, 0.5, 0)
 		restore.Activated:Connect(function()
@@ -598,7 +747,7 @@ function App.revertTo(self: App, seq: number)
 		return
 	end
 	if #self:_changedSheets() > 0 then
-		self:_say("Apply していない編集がある。先に Apply するか捨てる", true)
+		self:_say("There are unapplied edits. Apply or discard them first.", true)
 		return
 	end
 
@@ -608,18 +757,18 @@ function App.revertTo(self: App, seq: number)
 		local found, target = Session.readCommit(backend, seq)
 		if not found or target == nil then
 			self.busy = false
-			self:_say(`commit #{seq} を読めない`, true)
+			self:_say(`Could not read commit #{seq}`, true)
 			return
 		end
 
-		local ok, result = Session.revert(backend, self.state :: Session.State, target, { at = DateTime.now():ToIsoDate(), by = author(), note = nil })
+		local ok, result = Session.revert(backend, self.state :: Session.State, target, { at = DateTime.now():ToIsoDate(), by = author, note = nil })
 		self.busy = false
 		if not ok then
-			self:_say(`戻せなかった: {tostring(result)}`, true)
+			self:_say(`Restore failed: {tostring(result)}`, true)
 			return
 		end
 
-		self:_say(`#{seq} の値へ戻した（#{(result :: Session.Commit).seq} として積んだ）`, false)
+		self:_say(`Restored the values of #{seq} as #{(result :: Session.Commit).seq}`, false)
 		self:reload()
 
 		local schema = self.schema :: Schema.Normalized

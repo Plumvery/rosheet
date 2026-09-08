@@ -10,6 +10,7 @@ const COLUMN_TYPES = new Set(["string", "text", "number", "integer", "boolean", 
 const SHEET_KINDS = new Set(["table", "scalars"]);
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ASSET_VALUE = /^rbxassetid:\/\/\d+$/;
+const ROCAS_VALUE = /^rocas:\/\/assets\/[^\s]+$/;
 const COLOR_VALUE = /^#[0-9A-Fa-f]{6}$/;
 
 class SchemaError extends Error {}
@@ -162,8 +163,10 @@ function checkValue(column, value) {
 			return column.values.includes(value) ? null : `enum に無い値: ${JSON.stringify(value)}`;
 		case "asset":
 			if (typeof value !== "string") return `文字列でない: ${JSON.stringify(value)}`;
-			// 空を許すのは「まだ差し替えていない」を表せないと運用で嘘の ID を入れる羽目になるため
-			return value === "" || ASSET_VALUE.test(value) ? null : `空か rbxassetid://<数字> でない: ${JSON.stringify(value)}`;
+			// 空を許すのは「まだ差し替えていない」を表せないと運用で嘘の ID を入れる羽目になるため。
+			// rocas:// は生成のときに解決する（src/assets.js）。保存先にはこの形のまま置く
+			if (value === "" || ASSET_VALUE.test(value) || ROCAS_VALUE.test(value)) return null;
+			return `空 / rbxassetid://<数字> / rocas://assets/... のどれでもない: ${JSON.stringify(value)}`;
 		case "color":
 			if (typeof value !== "string") return `文字列でない: ${JSON.stringify(value)}`;
 			return COLOR_VALUE.test(value) ? null : `#RRGGBB でない: ${JSON.stringify(value)}`;

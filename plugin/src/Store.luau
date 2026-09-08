@@ -39,7 +39,7 @@ local function decode(key: string, text: string): (boolean, any)
 		return game:GetService("HttpService"):JSONDecode(text)
 	end)
 	if not success then
-		return false, `{key}: JSON として読めない`
+		return false, `{key}: not readable as JSON`
 	end
 	return true, value
 end
@@ -71,7 +71,7 @@ function Store.dataStore(name: string, scope: string?): Backend
 				return ok(nil)
 			end
 			if type(raw) ~= "string" then
-				return err(`{key}: rosheet が置いた値でない（JSON 文字列でない）`)
+				return err(`{key}: not a value rosheet wrote (not a JSON string)`)
 			end
 			local decoded, value = decode(key, raw)
 			return if decoded then ok(value) else err(value)
@@ -107,7 +107,7 @@ function Store.dataStore(name: string, scope: string?): Backend
 				return err(tostring(raw))
 			end
 			if aborted then
-				return err("競合: 他の誰かが先に書き込んだ")
+				return err("Conflict: someone else wrote first")
 			end
 			local decoded, value = decode(key, raw :: string)
 			return if decoded then ok(value) else err(value)
@@ -126,7 +126,7 @@ function Store.pluginSettings(plugin: Plugin, namespace: string): Backend
 
 	return {
 		kind = "settings",
-		label = "このマシンのプラグイン設定",
+		label = "Local plugin settings",
 
 		get = function(key: string): Result
 			local success, raw = pcall(function()
@@ -139,7 +139,7 @@ function Store.pluginSettings(plugin: Plugin, namespace: string): Backend
 				return ok(nil)
 			end
 			if type(raw) ~= "string" then
-				return err(`{key}: 文字列でない値が入っている`)
+				return err(`{key}: holds a non-string value`)
 			end
 			local decoded, value = decode(key, raw)
 			return if decoded then ok(value) else err(value)
@@ -172,7 +172,7 @@ function Store.pluginSettings(plugin: Plugin, namespace: string): Backend
 				return err(tostring(value))
 			end
 			if value == nil then
-				return err("競合: 他の誰かが先に書き込んだ")
+				return err("Conflict: someone else wrote first")
 			end
 			return ok(value)
 		end,
@@ -198,8 +198,9 @@ function Store.probe(backend: Backend): (boolean, string?)
 		or string.find(lowered, "studio access to apis is not allowed", 1, true) ~= nil
 	if blocked then
 		return false,
-			"Studio から API を叩けない。File > Game Settings > Security の "
-				.. '"Enable Studio Access to API Services" を入れる（place の公開も要る）'
+			"Studio cannot reach the API services. Turn on "
+				.. '"Enable Studio Access to API Services" in File > Game Settings > Security '
+				.. "(the place also has to be published)"
 	end
 	return false, message
 end

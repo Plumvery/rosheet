@@ -17,7 +17,7 @@ end
 
 local function normalizeRow(sheet: Schema.Sheet, raw: any, where: string): { [string]: any }
 	if type(raw) ~= "table" then
-		fail(where, "行はテーブルでなければならない")
+		fail(where, "a row must be a table")
 	end
 
 	local row: { [string]: any } = {}
@@ -39,7 +39,7 @@ function Rows.normalizeSheet(sheet: Schema.Sheet, raw: any): SheetValue
 
 	local list = if raw == nil then {} else raw
 	if type(list) ~= "table" then
-		fail(`sheet {sheet.name}`, "表の値は配列でなければならない")
+		fail(`sheet {sheet.name}`, "a table sheet value must be an array")
 	end
 
 	local rows: { { [string]: any } } = {}
@@ -49,10 +49,10 @@ function Rows.normalizeSheet(sheet: Schema.Sheet, raw: any): SheetValue
 		if sheet.key ~= nil then
 			local key = row[sheet.key :: string]
 			if key == "" then
-				fail(`sheet {sheet.name}[{index}]`, `{sheet.key} が空`)
+				fail(`sheet {sheet.name}[{index}]`, `{sheet.key} is empty`)
 			end
 			if seen[key] then
-				fail(`sheet {sheet.name}[{index}]`, `{sheet.key} が重複している: {key}`)
+				fail(`sheet {sheet.name}[{index}]`, `duplicate {sheet.key}: {key}`)
 			end
 			seen[key] = true
 		end

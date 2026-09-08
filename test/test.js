@@ -201,3 +201,45 @@ test("プラグインは Script 1 つと ModuleScript の木になる", () => {
 	assert.ok(xml.includes("マスターデータ"));
 	assert.strictEqual((xml.match(/<!\[CDATA\[/g) || []).length, (xml.match(/\]\]>/g) || []).length);
 });
+
+test("asset 列は rocas:// も受ける", () => {
+	const schema = normalizeSchema({ sheets: [{ name: "s", columns: [{ name: "icon", type: "asset" }] }] });
+	const column = schema.sheets[0].columns[0];
+	const { checkValue } = require("../src/schema");
+
+	assert.strictEqual(checkValue(column, ""), null);
+	assert.strictEqual(checkValue(column, "rbxassetid://123"), null);
+	assert.strictEqual(checkValue(column, "rocas://assets/images/maps/SciFi.png"), null);
+	assert.match(checkValue(column, "rocas://images/maps/SciFi.png"), /どれでもない/);
+	assert.match(checkValue(column, "SciFi.png"), /どれでもない/);
+});
+
+test("生成の直前に asset を解決し、解決できない値は落とす", () => {
+	const { resolveDataset, createResolver, AssetError } = require("../src/assets");
+	const schema = normalizeSchema({
+		sheets: [
+			{ name: "s", key: "id", columns: [{ name: "id", type: "string" }, { name: "icon", type: "asset" }] },
+			{ name: "plain", key: "id", columns: [{ name: "id", type: "string" }] },
+		],
+	});
+	const dataset = normalizeDataset(schema, {
+		s: [{ id: "a", icon: "rocas://assets/images/a.png" }, { id: "b", icon: "rbxassetid://7" }, { id: "c" }],
+		plain: [{ id: "z" }],
+	});
+
+	const stub = { resolve: (value) => (value.startsWith("rocas://") ? "rbxassetid://99" : value) };
+	const resolved = resolveDataset(schema, dataset, stub);
+	assert.deepStrictEqual(
+		resolved.s.map((row) => row.icon),
+		["rbxassetid://99", "rbxassetid://7", ""],
+	);
+	// asset 列を持たないシートはそのまま返す（写しを作らない）
+	assert.strictEqual(resolved.plain, dataset.plain);
+
+	// rocas が無い環境では、rocas:// を解決しようとした時点で落ちる
+	const real = createResolver(__dirname);
+	assert.strictEqual(real.resolve("", "x"), "");
+	assert.strictEqual(real.resolve("rbxassetid://5", "x"), "rbxassetid://5");
+	assert.throws(() => real.resolve("rocas://images/a.png", "x"), AssetError);
+	assert.deepStrictEqual(real.entries(), []);
+});

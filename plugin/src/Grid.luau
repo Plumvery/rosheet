@@ -27,6 +27,7 @@ type Cell = {
 	box: TextBox?,
 	button: TextButton?,
 	label: TextLabel?,
+	preview: ImageLabel?,
 	column: Schema.Column?,
 	dynamic: boolean,
 }
@@ -52,8 +53,24 @@ export type Grid = typeof(setmetatable({} :: {
 	offsets: { number },
 	totalWidth: number,
 	selected: number?,
+	dropdown: ScrollingFrame?,
+	catcher: TextButton?,
+	tooltip: TextLabel?,
+	assets: { { path: string, assetId: string, kind: string } },
+	locked: boolean,
 	connections: { RBXScriptConnection },
 }, Grid))
+
+-- ドロップダウンに一度に出す最大の行数。これを超えたら中でスクロールさせる
+local DROPDOWN_MAX_ROWS = 8
+local TOOLTIP_WIDTH = 260
+local LIST_MIN_WIDTH = 220
+local ASSET_PREVIEW_WIDTH = 22
+local ROCAS_SCHEME = "rocas://"
+-- 補完に出す上限。全部出しても選べないし、Frame を作るぶんだけ遅くなる
+local SUGGESTION_LIMIT = 40
+local SUGGESTION_CLOSE_DELAY = 0.2
+local DROPDOWN_ARROW = "\u{25BE}"
 
 local function palette()
 	return Theme.palette()
@@ -81,7 +98,7 @@ local function measure(sheet: Schema.Sheet): ({ number }, { number }, number)
 	local offsets: { number } = {}
 	local total = 0
 	for index, column in sheet.columns do
-		widths[index] = Theme.columnWidth(column.type)
+		widths[index] = Theme.columnWidth(column)
 		offsets[index] = total
 		total += widths[index]
 	end
@@ -170,6 +187,11 @@ function Grid.new(parent: Instance): Grid
 		offsets = {},
 		totalWidth = 0,
 		selected = nil,
+		dropdown = nil,
+		catcher = nil,
+		tooltip = nil,
+		assets = {},
+		locked = false,
 		connections = {},
 	}, Grid) :: Grid
 
@@ -193,6 +215,21 @@ function Grid._syncScroll(self: Grid)
 	local position = self.body.CanvasPosition
 	self.headerContent.Position = UDim2.fromOffset(-position.X, 0)
 	self.gutterContent.Position = UDim2.fromOffset(0, -position.Y)
+	-- 開いたまま動かすと、候補の一覧や説明が別のセルの上に居座る
+	self:_closeDropdown()
+	self:_hideTooltip()
+	self:_bindVisible()
+end
+
+--[[
+	Apply の最中は編集を止める。止めないと、送っている途中の下書きを書き換えられてしまい、
+	Apply した内容と画面の内容が食い違う。
+]]
+function Grid.setLocked(self: Grid, locked: boolean)
+	self.locked = locked
+	if locked then
+		self:_closeDropdown()
+	end
 	self:_bindVisible()
 end
 
@@ -209,36 +246,90 @@ function Grid._buildHeader(self: Grid)
 	local headings: { Schema.Column } = sheet.columns
 	if sheet.kind == "scalars" then
 		headings = {
-			{ name = "key", type = "string", readonly = true, description = "定数の名前", default = "" },
+			{ name = "key", type = "string", readonly = true, description = "Name of the constant", default = "" },
 			{ name = "value", type = "string", readonly = false, description = "", default = "" },
 		}
 	end
 
 	for index, column in headings do
-		local cell = Instance.new("TextLabel")
+		-- ヘッダは列名だけ。型と説明はホバーで出す。並べて置くと列を広げる羽目になり、
+		-- 一度に見える列が減る
+		local cell = Instance.new("TextButton")
 		cell.BackgroundTransparency = 1
+		cell.AutoButtonColor = false
+		cell.Name = column.name
 		cell.Position = UDim2.fromOffset(self.offsets[index], 0)
 		cell.Size = UDim2.fromOffset(self.widths[index], Theme.HEADER_HEIGHT)
 		cell.Font = Theme.FONT
 		cell.TextSize = Theme.TEXT_SIZE
 		cell.TextColor3 = if column.readonly then colors.readonlyText else colors.text
 		cell.TextXAlignment = Enum.TextXAlignment.Left
+		cell.TextTruncate = Enum.TextTruncate.AtEnd
 		cell.Text = ` {column.name}`
-		-- 列の意味と readonly はここでしか出せない。セルには出す場所が無い
-		cell.Name = column.name
-		local hint = if column.description ~= "" then column.description else column.type
 		cell.Parent = self.headerContent
 
-		local tip = Instance.new("TextLabel")
-		tip.BackgroundTransparency = 1
-		tip.Size = UDim2.fromScale(1, 1)
-		tip.Font = Theme.FONT
-		tip.TextSize = Theme.TEXT_SIZE - 3
-		tip.TextColor3 = colors.dimText
-		tip.TextXAlignment = Enum.TextXAlignment.Right
-		tip.Text = if column.readonly then "readonly " else `{hint} `
-		tip.TextTruncate = Enum.TextTruncate.AtEnd
-		tip.Parent = cell
+		cell.MouseEnter:Connect(function()
+			self:_showTooltip(cell, column)
+		end)
+		cell.MouseLeave:Connect(function()
+			self:_hideTooltip()
+		end)
+	end
+end
+
+--[[ 列の型・readonly・説明をヘッダの下に出す。Roblox に tooltip は無いので自前で置く ]]
+function Grid._showTooltip(self: Grid, anchor: GuiObject, column: Schema.Column)
+	self:_hideTooltip()
+
+	local colors = palette()
+	local lines = { column.type }
+	if column.readonly then
+		table.insert(lines, "readonly")
+	end
+	if column.values ~= nil then
+		table.insert(lines, table.concat(column.values, " / "))
+	end
+	if column.min ~= nil or column.max ~= nil then
+		table.insert(lines, `range {if column.min ~= nil then column.min else "-"} .. {if column.max ~= nil then column.max else "-"}`)
+	end
+
+	local tip = Instance.new("TextLabel")
+	tip.BackgroundColor3 = colors.surface
+	tip.BorderSizePixel = 0
+	tip.AutomaticSize = Enum.AutomaticSize.Y
+	tip.Size = UDim2.fromOffset(TOOLTIP_WIDTH, 0)
+	tip.Font = Theme.FONT
+	tip.TextSize = Theme.TEXT_SIZE
+	tip.TextColor3 = colors.text
+	tip.TextXAlignment = Enum.TextXAlignment.Left
+	tip.TextYAlignment = Enum.TextYAlignment.Top
+	tip.TextWrapped = true
+	tip.RichText = true
+	tip.ZIndex = 30
+	local detail = table.concat(lines, "  ·  ")
+	tip.Text = if column.description ~= ""
+		then `{column.description}\n<font color="#6A6F81">{detail}</font>`
+		else `<font color="#6A6F81">{detail}</font>`
+	tip.Parent = self.root
+	stroke(tip, colors.header)
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 5)
+	padding.PaddingBottom = UDim.new(0, 5)
+	padding.PaddingLeft = UDim.new(0, 7)
+	padding.PaddingRight = UDim.new(0, 7)
+	padding.Parent = tip
+
+	-- 右端の列でウィンドウの外へはみ出さないように寄せる
+	local left = anchor.AbsolutePosition.X - self.root.AbsolutePosition.X
+	tip.Position = UDim2.fromOffset(math.max(0, math.min(left, self.root.AbsoluteSize.X - TOOLTIP_WIDTH)), Theme.HEADER_HEIGHT)
+	self.tooltip = tip
+end
+
+function Grid._hideTooltip(self: Grid)
+	if self.tooltip ~= nil then
+		(self.tooltip :: TextLabel):Destroy()
+		self.tooltip = nil
 	end
 end
 
@@ -254,7 +345,7 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 	frame.Size = UDim2.fromOffset(self.widths[index] - 1, Theme.ROW_HEIGHT - 1)
 	frame.Parent = row.frame
 
-	local cell: Cell = { frame = frame, box = nil, button = nil, label = nil, column = column, dynamic = false }
+	local cell: Cell = { frame = frame, box = nil, button = nil, label = nil, preview = nil, column = column, dynamic = false }
 
 	if column.readonly then
 		local label = Instance.new("TextLabel")
@@ -284,8 +375,20 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 		button.Parent = frame
 		cell.button = button
 
+		-- クリックすると何か起きる列だと分かるようにする。見た目がただの文字だと気付けない
+		local affordance = Instance.new("TextLabel")
+		affordance.BackgroundTransparency = 1
+		affordance.AnchorPoint = Vector2.new(1, 0)
+		affordance.Position = UDim2.fromScale(1, 0)
+		affordance.Size = UDim2.new(0, 16, 1, 0)
+		affordance.Font = Theme.FONT
+		affordance.TextSize = Theme.TEXT_SIZE
+		affordance.TextColor3 = colors.dimText
+		affordance.Text = if column.type == "enum" then DROPDOWN_ARROW else "\u{21C4}"
+		affordance.Parent = frame
+
 		button.Activated:Connect(function()
-			self:_cycle(row, cell)
+			self:_pick(row, cell)
 		end)
 		return cell
 	end
@@ -303,11 +406,21 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 	box.Parent = frame
 	cell.box = box
 
+	if column.type == "asset" then
+		self:_attachAsset(row, cell, box)
+	end
+
 	box.Focused:Connect(function()
 		self:_select(row.index)
 	end)
 	box.FocusLost:Connect(function()
 		self:_commit(row, cell)
+		-- すぐ閉じると、候補をクリックしたときに Activated より先に消えて選べない
+		task.delay(SUGGESTION_CLOSE_DELAY, function()
+			if not box:IsFocused() then
+				self:_closeDropdown()
+			end
+		end)
 	end)
 	return cell
 end
@@ -350,7 +463,7 @@ function Grid._buildScalarCells(self: Grid, row: Row)
 	nameLabel.Text = ""
 	nameLabel.Parent = nameFrame
 
-	row.cells[1] = { frame = nameFrame, box = nil, button = nil, label = nameLabel, column = nil, dynamic = true }
+	row.cells[1] = { frame = nameFrame, box = nil, button = nil, label = nameLabel, preview = nil, column = nil, dynamic = true }
 
 	local valueFrame = Instance.new("Frame")
 	valueFrame.BackgroundColor3 = colors.background
@@ -371,6 +484,15 @@ function Grid._buildScalarCells(self: Grid, row: Row)
 	box.Text = ""
 	box.Parent = valueFrame
 
+	local preview = Instance.new("ImageLabel")
+	preview.Name = "Preview"
+	preview.BackgroundTransparency = 1
+	preview.Position = UDim2.fromOffset(3, 3)
+	preview.Size = UDim2.fromOffset(Theme.ROW_HEIGHT - 7, Theme.ROW_HEIGHT - 7)
+	preview.Image = ""
+	preview.Visible = false
+	preview.Parent = valueFrame
+
 	local button = Instance.new("TextButton")
 	button.BackgroundTransparency = 1
 	button.AnchorPoint = Vector2.new(1, 0)
@@ -384,7 +506,7 @@ function Grid._buildScalarCells(self: Grid, row: Row)
 	button.Visible = false
 	button.Parent = valueFrame
 
-	local cell: Cell = { frame = valueFrame, box = box, button = button, label = nil, column = nil, dynamic = true }
+	local cell: Cell = { frame = valueFrame, box = box, button = button, label = nil, preview = preview, column = nil, dynamic = true }
 	row.cells[2] = cell
 
 	box.Focused:Connect(function()
@@ -394,33 +516,243 @@ function Grid._buildScalarCells(self: Grid, row: Row)
 		self:_commit(row, cell)
 	end)
 	button.Activated:Connect(function()
-		self:_cycle(row, cell)
+		self:_pick(row, cell)
 	end)
 end
 
---[[ boolean は反転、enum は次の候補へ。ドロップダウンを出さずに済むぶん速い ]]
-function Grid._cycle(self: Grid, row: Row, cell: Cell)
-	local index = row.index
-	local callbacks = self.callbacks
-	local column = self:_columnFor(row, cell)
-	if index == nil or callbacks == nil or column == nil then
+function Grid._closeDropdown(self: Grid)
+	if self.dropdown ~= nil then
+		(self.dropdown :: ScrollingFrame):Destroy()
+		self.dropdown = nil
+	end
+	if self.catcher ~= nil then
+		(self.catcher :: TextButton):Destroy()
+		self.catcher = nil
+	end
+end
+
+--[[
+	セルの下に一覧を開く。enum の候補にも rocas:// の補完にも使う。
+
+	body（ScrollingFrame）ではなく root にぶら下げる。body に入れると最終行のセルで開いた
+	ときにスクロール領域で切り取られて、候補が読めなくなる。
+
+	`modal` が true のときは背後を覆って外側のクリックで閉じる。補完のときは覆わない —— 
+	覆うと入力中の TextBox にキーが届かなくなる。
+]]
+function Grid._openList(
+	self: Grid,
+	anchor: GuiObject,
+	options: { { text: string, image: string? } },
+	selected: string?,
+	modal: boolean,
+	onPick: (string) -> ()
+)
+	self:_closeDropdown()
+	if #options == 0 then
 		return
 	end
 
-	local current = self:_cellValue(index, column.name)
-	local next: any
-	if column.type == "boolean" then
-		next = not current
-	elseif column.type == "enum" then
-		local values = column.values :: { string }
-		local at = table.find(values, current)
-		next = values[if at == nil or at == #values then 1 else at + 1]
-	else
+	local colors = palette()
+	local height = math.min(#options, DROPDOWN_MAX_ROWS) * Theme.ROW_HEIGHT + 2
+
+	if modal then
+		local catcher = Instance.new("TextButton")
+		catcher.BackgroundTransparency = 1
+		catcher.Size = UDim2.fromScale(1, 1)
+		catcher.Text = ""
+		catcher.AutoButtonColor = false
+		catcher.ZIndex = 19
+		catcher.Parent = self.root
+		self.catcher = catcher
+		catcher.Activated:Connect(function()
+			self:_closeDropdown()
+		end)
+	end
+
+	local origin = self.root.AbsolutePosition
+	local at = anchor.AbsolutePosition - origin
+	local below = at.Y + Theme.ROW_HEIGHT - 1
+	local top = if below + height <= self.root.AbsoluteSize.Y then below else math.max(0, at.Y - height + 1)
+	local width = math.max(anchor.AbsoluteSize.X, LIST_MIN_WIDTH)
+
+	local list = Instance.new("ScrollingFrame")
+	list.BackgroundColor3 = colors.surface
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(math.min(at.X, math.max(0, self.root.AbsoluteSize.X - width)), top)
+	list.Size = UDim2.fromOffset(width, height)
+	list.CanvasSize = UDim2.fromOffset(0, #options * Theme.ROW_HEIGHT)
+	list.ScrollBarThickness = 6
+	list.ZIndex = 20
+	list.Parent = self.root
+	self.dropdown = list
+	stroke(list, colors.header)
+
+	for order, option in options do
+		local isSelected = selected ~= nil and option.text == selected
+		local entry = Instance.new("TextButton")
+		entry.BackgroundColor3 = if isSelected then colors.selected else colors.surface
+		entry.BorderSizePixel = 0
+		entry.Position = UDim2.fromOffset(0, (order - 1) * Theme.ROW_HEIGHT)
+		entry.Size = UDim2.new(1, 0, 0, Theme.ROW_HEIGHT)
+		entry.Font = Theme.FONT
+		entry.TextSize = Theme.TEXT_SIZE
+		entry.TextColor3 = colors.text
+		entry.TextXAlignment = Enum.TextXAlignment.Left
+		entry.TextTruncate = Enum.TextTruncate.AtEnd
+		entry.ZIndex = 21
+		entry.Parent = list
+
+		if option.image ~= nil then
+			local preview = Instance.new("ImageLabel")
+			preview.BackgroundTransparency = 1
+			preview.Position = UDim2.fromOffset(3, 3)
+			preview.Size = UDim2.fromOffset(Theme.ROW_HEIGHT - 6, Theme.ROW_HEIGHT - 6)
+			preview.Image = option.image :: string
+			preview.ZIndex = 22
+			preview.Parent = entry
+			entry.Text = `      {option.text}`
+		else
+			entry.Text = ` {option.text}`
+		end
+
+		entry.MouseEnter:Connect(function()
+			entry.BackgroundColor3 = colors.header
+		end)
+		entry.MouseLeave:Connect(function()
+			entry.BackgroundColor3 = if isSelected then colors.selected else colors.surface
+		end)
+		entry.Activated:Connect(function()
+			self:_closeDropdown()
+			onPick(option.text)
+		end)
+	end
+end
+
+--[[ enum の候補 ]]
+function Grid._openDropdown(self: Grid, row: Row, cell: Cell, column: Schema.Column)
+	local index = row.index
+	local callbacks = self.callbacks
+	local values = column.values
+	if index == nil or callbacks == nil or values == nil then
+		return
+	end
+
+	local options: { { text: string, image: string? } } = {}
+	for _, value in values do
+		table.insert(options, { text = value })
+	end
+
+	self:_openList(cell.frame, options, self:_cellValue(index, column.name), true, function(picked: string)
+		self:_select(index)
+		if callbacks.onEdit(index, column.name, picked) then
+			self:_bindVisible()
+		end
+	end)
+end
+
+--[[ rocas:// を打っている途中に、lock にあるパスから絞って出す ]]
+function Grid._openAssetSuggestions(self: Grid, row: Row, cell: Cell, column: Schema.Column, typed: string)
+	local index = row.index
+	local callbacks = self.callbacks
+	if index == nil or callbacks == nil then
+		return
+	end
+
+	local needle = string.lower(typed)
+	local options: { { text: string, image: string? } } = {}
+	for _, asset in self.assets do
+		if #options >= SUGGESTION_LIMIT then
+			break
+		end
+		if string.find(string.lower(asset.path), needle, 1, true) ~= nil then
+			table.insert(options, { text = asset.path, image = if asset.kind == "image" then asset.assetId else nil })
+		end
+	end
+
+	-- 覆いを出さない。出すと入力中の TextBox にキーが届かなくなる
+	self:_openList(cell.frame, options, nil, false, function(picked: string)
+		local box = cell.box
+		if box ~= nil then
+			box.Text = picked
+		end
+		self:_select(index)
+		if callbacks.onEdit(index, column.name, picked) then
+			self:_bindVisible()
+		end
+	end)
+end
+
+--[[ 焼き込んだ rocas の一覧を受け取る。rocas を使っていないプロジェクトでは空 ]]
+function Grid.setAssets(self: Grid, assets: { { path: string, assetId: string, kind: string } })
+	self.assets = assets
+end
+
+--[[ セルの値をサムネイルに出せる ID へ。出せないなら nil ]]
+function Grid._resolveAsset(self: Grid, value: any): string?
+	if type(value) ~= "string" or value == "" then
+		return nil
+	end
+	if string.match(value, "^rbxassetid://%d+$") ~= nil then
+		return value
+	end
+	for _, asset in self.assets do
+		if asset.path == value then
+			return if asset.kind == "image" then asset.assetId else nil
+		end
+	end
+	return nil
+end
+
+--[[ asset 列の TextBox に、左のサムネイルと rocas:// の補完を付ける ]]
+function Grid._attachAsset(self: Grid, row: Row, cell: Cell, box: TextBox)
+	local preview = Instance.new("ImageLabel")
+	preview.Name = "Preview"
+	preview.BackgroundTransparency = 1
+	preview.Position = UDim2.fromOffset(3, 3)
+	preview.Size = UDim2.fromOffset(Theme.ROW_HEIGHT - 7, Theme.ROW_HEIGHT - 7)
+	preview.Image = ""
+	preview.Parent = cell.frame
+	cell.preview = preview
+
+	box.Position = UDim2.fromOffset(ASSET_PREVIEW_WIDTH, 0)
+	box.Size = UDim2.new(1, -ASSET_PREVIEW_WIDTH, 1, 0)
+
+	box:GetPropertyChangedSignal("Text"):Connect(function()
+		if not box:IsFocused() then
+			return
+		end
+		local column = self:_columnFor(row, cell)
+		if column == nil or column.type ~= "asset" then
+			return
+		end
+		if string.sub(box.Text, 1, #ROCAS_SCHEME) == ROCAS_SCHEME then
+			self:_openAssetSuggestions(row, cell, column, box.Text)
+		else
+			self:_closeDropdown()
+		end
+	end)
+end
+
+--[[ boolean は 2 値なので反転で足りる。enum は候補から選ばせる ]]
+function Grid._pick(self: Grid, row: Row, cell: Cell)
+	local index = row.index
+	local callbacks = self.callbacks
+	local column = self:_columnFor(row, cell)
+	if index == nil or callbacks == nil or column == nil or column.readonly or self.locked then
+		return
+	end
+
+	if column.type == "enum" then
+		self:_openDropdown(row, cell, column)
+		return
+	end
+	if column.type ~= "boolean" then
 		return
 	end
 
 	self:_select(index)
-	if callbacks.onEdit(index, column.name, next) then
+	if callbacks.onEdit(index, column.name, not self:_cellValue(index, column.name)) then
 		self:_bindVisible()
 	end
 end
@@ -575,7 +907,13 @@ function Grid._bindVisible(self: Grid)
 					if not box:IsFocused() then
 						box.Text = text
 					end
-					box.TextEditable = not column.readonly
+					box.TextEditable = not column.readonly and not self.locked
+				end
+				if cell.preview ~= nil then
+					local preview = cell.preview :: ImageLabel
+					local resolved = if column.type == "asset" then self:_resolveAsset(self:_cellValue(index, column.name)) else nil
+					preview.Image = if resolved ~= nil then resolved else ""
+					preview.Visible = resolved ~= nil
 				end
 				if cell.button ~= nil then
 					local button = cell.button :: TextButton
@@ -587,10 +925,12 @@ function Grid._bindVisible(self: Grid)
 					end
 				end
 
+				-- 1 行おきに薄く敷く。行をまたいで目で追うときに、どのセルが同じ行かを見失わない
 				cell.frame.BackgroundColor3 = if dirty
 					then colors.dirty
 					elseif column.readonly or isNameCell then colors.readonlyCell
 					elseif self.selected == index then colors.selected
+					elseif index % 2 == 0 then colors.stripe
 					else colors.background
 				cell.frame.BackgroundTransparency = if dirty then 0.55 else 0
 			end
