@@ -53,6 +53,11 @@ export interface Definition {
 	readonly writablePlaces?: readonly number[];
 }
 
+/** ランタイムの版。プラグインが「place に置かれている版」と「Studio が評価している版」を
+ * 突き合わせ、ズレていたら読み取り専用になる（Studio の require キャッシュは恒久的なので、
+ * ランタイムを上げた直後の 1 セッションは古い defineSchema が評価され続ける） */
+export declare const VERSION: number;
+
 export declare function column(name: string, columnType: ColumnType, options?: ColumnOptions): Column;
 export declare function sheet(name: string, options: SheetOptions): Sheet;
 export declare function defineSchema(sheets: readonly Sheet[], options?: DefinitionOptions): Definition;

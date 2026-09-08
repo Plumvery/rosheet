@@ -67,7 +67,7 @@ return rosheet.defineSchema({
 npx rosheet runtime
 ```
 
-既定では `output.dir` の隣に `rosheet/` を書く（`--out <dir>` で変えられる）。それを Rojo で place へ配線すれば（上の例では `ReplicatedStorage.Packages.rosheet`）、この 1 本の require から `defineSchema` も `bind` も取れる。片方だけなら `Packages.rosheet.schema` / `Packages.rosheet.live` と分けて require してもよい。**複製なので、rosheet を上げたら打ち直す。**
+既定では `output.dir` の隣に `rosheet/` を書く（`--out <dir>` で変えられる）。それを Rojo で place へ配線すれば（上の例では `ReplicatedStorage.Packages.rosheet`）、この 1 本の require から `defineSchema` も `bind` も取れる。片方だけなら `Packages.rosheet.schema` / `Packages.rosheet.live` と分けて require してもよい。**複製なので、rosheet を上げたら打ち直す。打ち直したら Studio を開き直す。** Studio の `require` は戻り値をインスタンス単位で恒久的にキャッシュするので、Rojo が同期しても古いランタイムが評価され続け、その 1 セッションのあいだ新しい宣言（`writablePlaces` など）が黙って落ちる。プラグインはこのズレを見つけると読み取り専用になり、開き直すよう出す。
 
 **roblox-ts の場合。** `output.format = "roblox-ts"` なら `.d.ts` も一緒に置かれるので、`src/` の下へ出せばそのまま import できる:
 

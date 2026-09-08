@@ -6,6 +6,28 @@
 
 local Schema = {}
 
+--[[
+	ランタイムの版。**宣言の形を変えたら 1 つ上げる**（`defineSchema` の第 2 引数に鍵を足した、
+	列の型を足した、など）。
+
+	何のためにあるか。Roblox の require は戻り値をインスタンス単位で恒久的にキャッシュする。
+	プラグインはスキーマモジュールの写しを require してそれを避けているが、写しの中の
+	`require(script.Parent.rosheet.schema)` は写しではなく元のインスタンスを指すので、
+	ランタイムのキャッシュには当たったままになる。`rosheet runtime` で上げた直後の 1 セッションは
+	古い defineSchema が評価され続け、**新しい宣言が警告も無しに落ちる**（古い defineSchema は
+	知らない鍵を捨てるだけ）。
+
+	内側の require まで写す一般の手が無いので、見つけて言う。プラグインは place に置かれた
+	この Source から下の行を読み、実際に評価されたランタイムの `VERSION` と突き合わせて、
+	ズレていたら「Studio を開き直せ」と出して読み取り専用になる。
+
+	`ROSHEET_RUNTIME_VERSION` という名前と `= <数字>` という書式は plugin/src/Place.luau が
+	Source から探す目印。変えるならあちらも変える（test/schema.test.luau が見張っている）。
+]]
+local ROSHEET_RUNTIME_VERSION = 1
+
+Schema.VERSION = ROSHEET_RUNTIME_VERSION
+
 export type ColumnType = "string" | "text" | "number" | "integer" | "boolean" | "enum" | "asset" | "color"
 
 export type ColumnOptions = {
@@ -62,6 +84,13 @@ local VALID_TYPES: { [string]: boolean } = {
 	enum = true,
 	asset = true,
 	color = true,
+}
+
+-- defineSchema の第 2 引数に書ける鍵。ここに無い鍵は捨てずに落とす（下の理由）
+local KNOWN_OPTIONS: { [string]: boolean } = {
+	datastore = true,
+	scope = true,
+	writablePlaces = true,
 }
 
 --[[
@@ -136,11 +165,23 @@ end
 
 	**これは事故を止めるためのもので、権限の境界ではない。** DataStore の書き込み権限は
 	universe 単位なので、この宣言を書き換えた place を開けば書ける。
+
+	第 2 引数に知らない鍵を書くと落ちる。黙って捨てると「宣言したのに効かない」が気づかれずに
+	残るため（`writablePlaces` がまさにそれで消えた）。
 ]]
 function Schema.defineSchema(sheets: { Sheet }, options: DefinitionOptions?): Definition
 	assert(type(sheets) == "table" and #sheets > 0, "rosheet.defineSchema: sheets is empty")
 
 	local settings = options or {}
+
+	-- 知らない鍵は捨てずに落とす。捨てると「宣言したのに効かない」が黙って通る。ランタイムを
+	-- 上げた直後は古い評価結果がキャッシュから返る（VERSION の項）ので、そこで新しい鍵が
+	-- 消えても誰も気づけなかった。少なくとも新しい側では落ちるようにしておく
+	local provided: { [string]: any } = settings :: any
+	for key in provided do
+		assert(KNOWN_OPTIONS[key], `rosheet.defineSchema: unknown option: {tostring(key)}`)
+	end
+
 	assert(
 		settings.datastore == nil or (type(settings.datastore) == "string" and settings.datastore ~= ""),
 		"rosheet.defineSchema: datastore must be a non-empty string"
