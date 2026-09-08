@@ -621,6 +621,10 @@ function App._refreshGrid(self: App)
 	local draft = self.draft :: { [string]: any }
 	local saved = (self.state :: Session.State).dataset
 
+	-- 読み取り専用の place では表からも編集させない。Apply だけ止めても、保存できない下書きを
+	-- いくらでも作れてしまい、気づくのは Apply に手を伸ばしたとき
+	self.grid:setReadOnly(self.readOnly ~= nil)
+
 	self.grid:setSheet(sheet, draft[sheet.name], {
 		onEdit = function(rowIndex: number, columnName: string, value: any): boolean
 			if sheet.kind == "scalars" then
@@ -710,7 +714,8 @@ function App._refreshToolbar(self: App)
 	-- Discard は常に出す。変更があるときだけ現れると、押せる場所が動いて狙いにくい
 	setEnabled(self.discardButton, idle and dirty)
 
-	local canAddRows = sheet.kind == "table" and sheet.rows == "open"
+	-- 行の増減も書き込み。読み取り専用の place では入口ごと閉じる
+	local canAddRows = sheet.kind == "table" and sheet.rows == "open" and writable
 	setEnabled(self.addButton, idle and canAddRows)
 	setEnabled(self.deleteButton, idle and canAddRows and self.grid:selectedRow() ~= nil)
 	setEnabled(self.historyButton, idle)
@@ -868,7 +873,8 @@ end
 
 function App.addRow(self: App)
 	local sheet = self:_sheet()
-	if self.busy or sheet.kind ~= "table" or sheet.rows ~= "open" then
+	-- ボタンは落としてあるが、ここでも見る。読み取り専用は「押せない」ではなく「しない」
+	if self.busy or self.readOnly ~= nil or sheet.kind ~= "table" or sheet.rows ~= "open" then
 		return
 	end
 
@@ -910,7 +916,7 @@ end
 function App.deleteRow(self: App)
 	local sheet = self:_sheet()
 	local index = self.grid:selectedRow()
-	if self.busy or sheet.kind ~= "table" or sheet.rows ~= "open" or index == nil then
+	if self.busy or self.readOnly ~= nil or sheet.kind ~= "table" or sheet.rows ~= "open" or index == nil then
 		return
 	end
 

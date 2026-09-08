@@ -62,6 +62,8 @@ export type Grid = typeof(setmetatable({} :: {
 	tooltip: TextLabel?,
 	assets: { { path: string, assetId: string, kind: string } },
 	locked: boolean,
+	-- 読み取り専用の place。locked と違って一時的なものではないので、見た目まで readonly 列に寄せる
+	readOnly: boolean,
 	connections: { RBXScriptConnection },
 }, Grid))
 
@@ -231,6 +233,7 @@ function Grid.new(parent: Instance): Grid
 		tooltip = nil,
 		assets = {},
 		locked = false,
+		readOnly = false,
 		connections = {},
 	}, Grid) :: Grid
 
@@ -270,6 +273,30 @@ function Grid.setLocked(self: Grid, locked: boolean)
 		self:_closeDropdown()
 	end
 	self:_bindVisible()
+end
+
+--[[
+	読み取り専用の place では、表からも編集させない。
+
+	setLocked と分けるのは、意味が違うため。あちらは「Apply の最中だけ触らせない」で、終われば
+	戻るので文字色まで変えない。こちらは「この place では編集しない」なので、`readonly` 列と
+	同じ見た目（灰色の文字と背景）に寄せて、押しても何も起きない入口を残さない。
+
+	切り替わったらセルを作り直す。作りが違う（候補の ▾ を出すかどうか）ので、行の Frame を
+	使い回したままだと、書けないセルに ▾ が残る。
+]]
+function Grid.setReadOnly(self: Grid, readOnly: boolean)
+	if self.readOnly == readOnly then
+		return
+	end
+
+	self.readOnly = readOnly
+	self:_closeDropdown()
+	for _, row in self.pool do
+		row.frame:Destroy()
+	end
+	table.clear(self.pool)
+	self:_layout()
 end
 
 --[[ ヘッダの列見出しを作り直す。シートが変わったときだけ ]]
@@ -413,24 +440,28 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 		button.Size = UDim2.fromScale(1, 1)
 		button.Font = Theme.FONT
 		button.TextSize = Theme.TEXT_SIZE
-		button.TextColor3 = colors.text
+		-- この列の文字色を決めるのはここだけ（_bindVisible は文字しか差し替えない）
+		button.TextColor3 = if self.readOnly then colors.readonlyText else colors.text
 		button.TextXAlignment = Enum.TextXAlignment.Left
 		button.Text = ""
 		button.AutoButtonColor = false
 		button.Parent = frame
 		cell.button = button
 
-		-- クリックすると候補が出る列だと分かるようにする。見た目がただの文字だと気付けない
-		local affordance = Instance.new("TextLabel")
-		affordance.BackgroundTransparency = 1
-		affordance.AnchorPoint = Vector2.new(1, 0)
-		affordance.Position = UDim2.fromScale(1, 0)
-		affordance.Size = UDim2.new(0, 16, 1, 0)
-		affordance.Font = Theme.FONT
-		affordance.TextSize = Theme.TEXT_SIZE
-		affordance.TextColor3 = colors.dimText
-		affordance.Text = DROPDOWN_ARROW
-		affordance.Parent = frame
+		-- クリックすると候補が出る列だと分かるようにする。見た目がただの文字だと気付けない。
+		-- 読み取り専用の place では出さない —— 押しても何も起きない入口になるため
+		if not self.readOnly then
+			local affordance = Instance.new("TextLabel")
+			affordance.BackgroundTransparency = 1
+			affordance.AnchorPoint = Vector2.new(1, 0)
+			affordance.Position = UDim2.fromScale(1, 0)
+			affordance.Size = UDim2.new(0, 16, 1, 0)
+			affordance.Font = Theme.FONT
+			affordance.TextSize = Theme.TEXT_SIZE
+			affordance.TextColor3 = colors.dimText
+			affordance.Text = DROPDOWN_ARROW
+			affordance.Parent = frame
+		end
 
 		button.Activated:Connect(function()
 			self:_pick(row, cell)
@@ -486,8 +517,14 @@ end
 --[[
 	その行のその列に書き込めるか。ロック中かどうかは見ない（Apply 中はどのセルも触れないが、
 	それは「この列が readonly」とは別の話で、文字までグレーにしたいわけではない）。
+
+	読み取り専用の place はこちらで見る。あちらと違って一時的ではないので、`readonly` 列と
+	同じ扱い —— 編集も候補も止まり、色もそちらに寄る。
 ]]
 function Grid._writable(self: Grid, rowIndex: number, column: Schema.Column): boolean
+	if self.readOnly then
+		return false
+	end
 	if not column.readonly then
 		return true
 	end

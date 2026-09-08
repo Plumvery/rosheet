@@ -116,7 +116,7 @@ npx rosheet init
 return rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "master" })
 ```
 
-**本番の place から書けないようにする。** 同じ universe の place は DataStore を共有するので、本番 place を Studio で開くこと自体が master data への書き込み権限になる。書いてよい place を宣言すると、そこに無い place ではプラグインが読み取り専用になる（表も履歴も読めるが、Apply が押せない。スキーマの publish もしない）:
+**本番の place から書けないようにする。** 同じ universe の place は DataStore を共有するので、本番 place を Studio で開くこと自体が master data への書き込み権限になる。書いてよい place を宣言すると、そこに無い place ではプラグインが読み取り専用になる（表も履歴も読めるが、セルに書けず、行も足せず、Apply も押せない。スキーマの publish もしない）:
 
 ```lua
 return rosheet.defineSchema({ ... }, {
