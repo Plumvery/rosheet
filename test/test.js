@@ -204,6 +204,33 @@ test("プラグインは Script 1 つと ModuleScript の木になる", () => {
 	assert.strictEqual((xml.match(/<!\[CDATA\[/g) || []).length, (xml.match(/\]\]>/g) || []).length);
 });
 
+test("runtime は format に合わせて利用側へ複製する", () => {
+	const { mkdtempSync, readdirSync } = require("node:fs");
+	const { tmpdir } = require("node:os");
+	const nodePath = require("node:path");
+	const { writeRuntime, filesFor } = require("../src/runtime");
+
+	// roblox-ts のプロジェクトから node_modules の .d.ts へは届かないので、src/ の中へ写す
+	assert.ok(filesFor("roblox-ts").includes("live.d.ts"));
+	assert.ok(!filesFor("luau").some((name) => name.endsWith(".d.ts")));
+	// README の require(Packages.rosheet) が通るための集約モジュール
+	assert.ok(filesFor("luau").includes("init.luau"));
+
+	const cwd = mkdtempSync(nodePath.join(tmpdir(), "rosheet-"));
+	const config = { output: { format: "luau", dir: "src/shared/config/generated" } };
+
+	const first = writeRuntime(config, { cwd });
+	assert.strictEqual(nodePath.relative(cwd, first.outDir), nodePath.join("src", "shared", "config", "rosheet"));
+	assert.deepStrictEqual(readdirSync(first.outDir).sort(), filesFor("luau"));
+
+	// 2 回目は書かない。書き直すと Rojo が毎回同期し直す
+	assert.deepStrictEqual(writeRuntime(config, { cwd }).written, []);
+
+	const typed = writeRuntime({ output: { format: "roblox-ts", dir: "out" } }, { cwd, output: "src/shared/rosheet" });
+	assert.strictEqual(nodePath.relative(cwd, typed.outDir), nodePath.join("src", "shared", "rosheet"));
+	assert.deepStrictEqual(readdirSync(typed.outDir).sort(), filesFor("roblox-ts"));
+});
+
 test("asset 列は rocas:// も受ける", () => {
 	const schema = normalizeSchema({ sheets: [{ name: "s", columns: [{ name: "icon", type: "asset" }] }] });
 	const column = schema.sheets[0].columns[0];

@@ -3,13 +3,15 @@
 # 編集の正は Studio プラグイン + DataStore、出荷の正はここで指定した生成物。
 #
 # 初回セットアップ:
-#   1. スキーマを宣言する ModuleScript を書き、place の ServerStorage に RosheetSchema として置く
+#   1. npx rosheet runtime       # defineSchema / bind を持つモジュールをこのプロジェクトへ複製する
+#                                # （rosheet を上げたら打ち直す）
+#   2. スキーマを宣言する ModuleScript を書き、place の ServerStorage に RosheetSchema として置く
 #      （プラグインが ServerStorage / ReplicatedStorage を走査して見つける）
-#   2. npx rosheet plugin        # Studio の Plugins フォルダにプラグインを置く（一度だけ）
-#   3. Studio で place を開く    # File > Experience Settings > Security で
+#   3. npx rosheet plugin        # Studio の Plugins フォルダにプラグインを置く（一度だけ）
+#   4. Studio で place を開く    # File > Experience Settings > Security で
 #                                # "Enable Studio Access to API Services" を入れておく
-#   4. プラグインでシートを編集して Apply
-#   5. npx rosheet pull          # 生成物を書き出してコミットする
+#   5. プラグインでシートを編集して Apply
+#   6. npx rosheet pull          # 生成物を書き出してコミットする
 
 [project]
 # Open Cloud から DataStore を読むのに使う。Studio プラグイン側は place 自身の universe を

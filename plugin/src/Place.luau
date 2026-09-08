@@ -29,11 +29,20 @@ local ROCAS_MARKER = "ROCAS_MANIFEST_JSON_BEGIN"
 local ROCAS_SCHEME = "rocas://"
 local IMAGE_EXTENSIONS: { [string]: boolean } = { png = true, jpg = true, jpeg = true, bmp = true, tga = true }
 
+-- require のキャッシュを避けるために作る一時的な写しの目印（Place.requireFresh）。写しは木に
+-- 足すので、走査からも見張りからも外す。外さないと、写しを足したこと自体が「place が変わった」
+-- になり、読み直しへ戻ってぐるぐる回る
+local CLONE_MARK = "__rosheetReloadCopy"
+
 -- Rojo の 1 回の同期は数百のイベントとして届く。まとめて 1 回に潰す
 local DEBOUNCE = 0.25
 
 local function roots(): { Instance }
 	return { ServerStorage, ReplicatedStorage }
+end
+
+local function isReloadCopy(instance: Instance): boolean
+	return string.find(instance.Name, CLONE_MARK, 1, true) ~= nil
 end
 
 --[[ Source はプラグインからしか読めない。読めない場面もあるので、落ちないようにしておく ]]
@@ -48,12 +57,33 @@ local function moduleScripts(): { ModuleScript }
 	local found: { ModuleScript } = {}
 	for _, root in roots() do
 		for _, descendant in root:GetDescendants() do
-			if descendant:IsA("ModuleScript") then
+			if descendant:IsA("ModuleScript") and not isReloadCopy(descendant) then
 				table.insert(found, descendant)
 			end
 		end
 	end
 	return found
+end
+
+--[[
+	モジュールを、require のキャッシュを避けて読む。
+
+	Roblox の require は戻り値をインスタンス単位で恒久的にキャッシュする。Rojo は同期のたびに
+	同じインスタンスの Source を書き換えるので、そのまま require するとスキーマを直しても古い
+	戻り値が返り続け、Studio を開き直すまで直らない（Reload を押しても同じ require を通る）。
+	読むたびに写しを作れば、キャッシュに当たらない。
+
+	写しは元と同じ親に置く。スキーマモジュールは `require(script.Parent.rosheet.schema)` の
+	ように相対で書けるので、親が違うと解決できない。
+]]
+function Place.requireFresh(module: ModuleScript): (boolean, any)
+	local copy = module:Clone()
+	copy.Name = `{module.Name}{CLONE_MARK}`
+	copy.Parent = module.Parent
+
+	local ok, result = pcall(require, copy)
+	copy:Destroy()
+	return ok, result
 end
 
 --[[
@@ -244,7 +274,7 @@ function Place.watch(onChanged: () -> ()): Watcher
 		table.insert(
 			self.connections,
 			root.DescendantAdded:Connect(function(descendant: Instance)
-				if descendant:IsA("ModuleScript") then
+				if descendant:IsA("ModuleScript") and not isReloadCopy(descendant) then
 					self:_schedule()
 				end
 			end)
@@ -252,7 +282,7 @@ function Place.watch(onChanged: () -> ()): Watcher
 		table.insert(
 			self.connections,
 			root.DescendantRemoving:Connect(function(descendant: Instance)
-				if descendant:IsA("ModuleScript") then
+				if descendant:IsA("ModuleScript") and not isReloadCopy(descendant) then
 					self:_schedule()
 				end
 			end)
