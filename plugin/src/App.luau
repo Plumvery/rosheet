@@ -100,6 +100,12 @@ local function loadSchema(): (Loaded?, string?)
 			"No rosheet schema found. Put a ModuleScript named RosheetSchema that returns rosheet.defineSchema(...) into ServerStorage"
 	end
 
+	-- ランタイムを上げた直後は、古い defineSchema が評価され続けて宣言が黙って落ちる
+	-- （Place.staleRuntime の説明）。落ちる宣言には writablePlaces も含まれる —— 本番 place を
+	-- 守るはずの宣言が消えたまま書けてしまうので、ズレている間は読み取り専用にする（Apply も
+	-- スキーマの publish も止まる）。読むだけなら害が無いので、表と履歴はそのまま出す
+	local stale = Place.staleRuntime()
+
 	local problem: string? = nil
 	for _, module in candidates do
 		-- そのまま require すると、Rojo が Source を書き換えても古い戻り値が返り続ける
@@ -127,11 +133,19 @@ local function loadSchema(): (Loaded?, string?)
 			then declared.datastore
 			else DEFAULT_DATASTORE
 		local scope = if type(declared.scope) == "string" and declared.scope ~= "" then declared.scope else nil
-		return { schema = schema, datastore = datastore, scope = scope, readOnly = readOnlyReason(declared) }, nil
+		-- ズレの方を先に出す。古い評価結果では writablePlaces 自体が消えているかもしれず、
+		-- 「この place は書ける」も当てにならない
+		local readOnly = if stale ~= nil then stale else readOnlyReason(declared)
+		return { schema = schema, datastore = datastore, scope = scope, readOnly = readOnly }, nil
 	end
 
 	-- 候補はあったのに、どれも読めなかった（rosheet の runtime モジュールのように、
-	-- defineSchema という語を含むだけのモジュールもここに来る）。最後の理由に一手を添える
+	-- defineSchema という語を含むだけのモジュールもここに来る）。最後の理由に一手を添える。
+	-- ランタイムがズレているなら、まず疑うのはそちら —— 新しいスキーマを古いランタイムで
+	-- 評価すると、宣言が落ちるだけでなく require ごと落ちることがある
+	if stale ~= nil then
+		return nil, `{tostring(problem)}. {stale :: string}`
+	end
 	return nil, `{tostring(problem)}. rosheet expects a ModuleScript that returns rosheet.defineSchema(...)`
 end
 

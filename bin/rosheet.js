@@ -362,6 +362,10 @@ async function cmdRuntime(config, argv, cwd) {
 	console.log(result.outDir);
 	// 複製なので、上げたぶんは自動では追いつかない。それがこのコマンドの唯一の弱点なので先に言う
 	console.log("Run this again after upgrading rosheet, and commit the result.");
+	// Studio の require は戻り値をインスタンス単位で恒久的にキャッシュする。Rojo が同期しても
+	// 古いランタイムが評価され続けるので、新しい宣言はその 1 セッションのあいだ効かない。
+	// プラグインは見つけて読み取り専用になるが、先に言っておく方が短い
+	console.log("If Studio is open, restart it: it keeps evaluating the runtime it loaded at startup.");
 }
 
 async function main() {

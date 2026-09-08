@@ -23,6 +23,10 @@ export type Asset = { path: string, assetId: string, kind: string }
 local SCHEMA_NAME = "RosheetSchema"
 local SCHEMA_MARKER = "defineSchema"
 
+-- ランタイム（runtime/schema.luau）を Source から見分ける目印と、そこに書かれている版。
+-- あちらの定数名と書式に合わせる（test/schema.test.luau が両方を見張る）
+local RUNTIME_VERSION_PATTERN = "ROSHEET_RUNTIME_VERSION%s*=%s*(%d+)"
+
 -- rocas の manifest は「JSON をマーカーで挟んだ長い文字列」として書かれている。require せず
 -- に Source から取り出す。rocas 側もプラグインでこの形で読んでいる
 local ROCAS_MARKER = "ROCAS_MANIFEST_JSON_BEGIN"
@@ -84,6 +88,59 @@ function Place.requireFresh(module: ModuleScript): (boolean, any)
 	local ok, result = pcall(require, copy)
 	copy:Destroy()
 	return ok, result
+end
+
+--[[
+	place に置かれているランタイムと、Studio が実際に評価しているランタイムがズレていないか。
+
+	requireFresh は**外側のスキーマモジュールしか写せない。** スキーマモジュールは
+	`require(script.Parent.rosheet.schema)` のようにランタイムを相対で引くが、写しの中の
+	その require は写しではなく元のインスタンスを指すので、ランタイムのキャッシュには当たった
+	ままになる。`rosheet runtime` で上げた直後の 1 セッションは、古い defineSchema が評価され
+	続け、**新しい宣言が警告も無しに落ちる**（古い defineSchema は知らない鍵を捨てるだけ）。
+	Studio を開き直すと直るので、追いかけている最中に消える。
+
+	内側の require まで一般に写す手が無いので、見つけて言う。Source に書かれている版
+	（＝ Rojo が置いた新しい方）と、require が返す版（＝ キャッシュに載っている古い方、
+	スキーマモジュールの内側の require が受け取るものそのもの）を比べる。
+
+	写しではなく元を require するのが要点。写すと新しい方が返ってきて、比べる意味が消える。
+	キャッシュに載せてしまうが、スキーマモジュールがどのみち同じことをするので増えない。
+
+	戻り値はズレているときの言い分。ズレていない・ランタイムが見つからない・版が読めないときは
+	nil（目印を持たない古いランタイムはそのまま通す）。
+
+	版を上げていない更新（コメントや実装だけの修正）は見つけられない。見つけたいのは
+	「宣言が黙って落ちる」ことなので、宣言の形が変わったときだけ上がればよい。
+]]
+function Place.staleRuntime(): string?
+	for _, module in moduleScripts() do
+		local source = readSource(module)
+		if source == nil then
+			continue
+		end
+
+		local declared = tonumber(string.match(source :: string, RUNTIME_VERSION_PATTERN))
+		if declared == nil then
+			continue
+		end
+
+		local ok, runtime = pcall(require, module)
+		if not ok or type(runtime) ~= "table" then
+			continue
+		end
+
+		local version = (runtime :: any).VERSION
+		local evaluated = if type(version) == "number" then version else nil
+		if evaluated ~= declared then
+			-- 版が読めないのは「目印を持たない古い版が載っている」ということ。ズレの一種
+			local running = if evaluated == nil then "an older one" else `v{evaluated}`
+			return `The rosheet runtime was updated ({module:GetFullName()} declares v{declared}, but Studio is still evaluating {running}). `
+				.. "Restart Studio: until then, new declarations are dropped without a warning, so rosheet stays read-only"
+		end
+	end
+
+	return nil
 end
 
 --[[
