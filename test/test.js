@@ -177,3 +177,27 @@ test("rbxmx は CDATA を閉じさせない", () => {
 	assert.ok(!xml.includes('"]]>"'));
 	assert.ok(xml.includes('<Item class="Script" referent="RBX0">'));
 });
+
+test("空の表が {} で読み戻っても壊れない", () => {
+	// Roblox の JSONEncode は空テーブルを {} と [] のどちらで書くか場面で変わる
+	assert.deepStrictEqual(normalizeDataset(SCHEMA, { guns: {} }).guns, []);
+	assert.deepStrictEqual(normalizeDataset(SCHEMA, { guns: [] }).guns, []);
+	assert.throws(() => normalizeDataset(SCHEMA, { guns: { a: 1 } }), /表の値は配列でなければならない/);
+});
+
+test("プラグインは Script 1 つと ModuleScript の木になる", () => {
+	const { buildPlugin } = require("../src/studio-plugin");
+	const config = normalizeConfig(parseToml('[schema]\npath = "ServerStorage.S"\n[output]\ndir = "o"', "t"), "t");
+	const xml = buildPlugin(config);
+
+	const classes = [...xml.matchAll(/<Item class="(\w+)"/g)].map((match) => match[1]);
+	const names = [...xml.matchAll(/<string name="Name">([^<]+)<\/string>/g)].map((match) => match[1]);
+
+	assert.strictEqual(classes[0], "Script");
+	assert.ok(classes.slice(1).every((className) => className === "ModuleScript"));
+	assert.deepStrictEqual(names[0], "rosheet");
+	for (const required of ["Config", "App", "Grid", "Session", "Store", "Live"]) assert.ok(names.includes(required), required);
+	// .rbxm を避けた理由がこれ。rbxm-parser は Script.Source の非 ASCII を壊す
+	assert.ok(xml.includes("マスターデータ"));
+	assert.strictEqual((xml.match(/<!\[CDATA\[/g) || []).length, (xml.match(/\]\]>/g) || []).length);
+});

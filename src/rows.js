@@ -60,7 +60,10 @@ function normalizeSheetValue(sheet, raw) {
 		return row;
 	}
 
-	const list = raw === undefined || raw === null ? [] : raw;
+	// Roblox の JSONEncode は空のテーブルを `{}` と `[]` のどちらで書くか場面で変わる。
+	// 空の表がここで落ちると「行を全部消したら二度と読めない」という壊れ方をする
+	const source = raw === undefined || raw === null ? [] : raw;
+	const list = !Array.isArray(source) && typeof source === "object" && Object.keys(source).length === 0 ? [] : source;
 	if (!Array.isArray(list)) fail(`sheet ${sheet.name}`, "表の値は配列でなければならない");
 
 	const rows = list.map((row, index) => normalizeRow(sheet, row, `sheet ${sheet.name}[${index}]`));

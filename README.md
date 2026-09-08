@@ -4,7 +4,7 @@
 
 スキーマは Luau / roblox-ts で書く。値は Studio のプラグインでスプレッドシートのように編集し、Apply を押すとその場のプレイテストに反映され、同時に履歴として残る。戻りたくなったら Apply 単位で巻き戻せる。確定したら `rosheet pull` で型付きのモジュールを書き出し、git に載せて place に焼く。
 
-> **pre-alpha。** CLI・コード生成・DataStore の履歴・CSV の出入りまでが動く。Studio プラグインは未実装（[進捗](#進捗)）。
+> **pre-alpha。** CLI・コード生成・DataStore の履歴・CSV の出入り・Studio プラグインまで実装済み。**ただし Studio の実機での往復はまだ確認していない**（[進捗](#進捗)）。
 
 ## なぜ
 
@@ -77,9 +77,31 @@ Studio の Plugins フォルダに `rosheet.rbxmx` が置かれる。Studio 側�
 
 ### 3. 編集して Apply
 
-Studio で place を開き、rosheet のウィンドウでシートを編集して Apply。プレイテスト中なら値がその場で入れ替わる。
+Studio で place を開き、ツールバーの rosheet を押すとウィンドウが出る。
 
-### 4. 生成物を取り込んでコミットする
+- 下のタブがシート。ヘッダ行と行番号の列は固定で、本体だけがスクロールする
+- `readonly` の列はグレーで、編集できない
+- `boolean` と `enum` はクリックで次の値へ切り替わる。それ以外のセルは TextBox なので、Studio 上では Ctrl+C / Ctrl+V がそのまま効く
+- 編集は下書きに溜まり、変えたセルが黄色く残る。**Apply を押すまで保存先に触らない**
+- Apply を押すと 1 つの commit として積まれ、プレイテスト中なら値がその場で入れ替わる
+- 「履歴」で過去の Apply が並ぶ。「戻す」でその時点の値に戻る（履歴は書き換えず、戻した結果を新しい commit として積むので、戻したあとにさらに戻れる）
+
+place をまだ公開していない、あるいは API Services を入れていない場合は、自動でこのマシンだけのローカル保存に切り替わる（その旨が画面に出る）。チームで共有するには DataStore が要る。
+
+### 4. プレイテスト中の値を使う
+
+ゲーム側が生成物をそのまま読むと、焼かれた値しか見えない。Apply を反映させたいところだけ `bind` を通す:
+
+```lua
+local rosheet = require(ReplicatedStorage.Packages.rosheet)
+local Guns = rosheet.bind(require(ReplicatedStorage.Config.guns), "guns")
+
+print(Guns.get("AK47").damage)
+```
+
+`bind` は本番では同梱値をそのまま返す（`RosheetLive` が存在しないため）。型も同梱値のまま変わらない。
+
+### 5. 生成物を取り込んでコミットする
 
 ```bash
 npx rosheet pull
@@ -134,15 +156,17 @@ for _, gun in Guns.rows do ... end
 
 ## 進捗
 
-| | |
-|---|---|
-| スキーマの定義（Luau / roblox-ts） | 動く |
-| コード生成（`*.luau` / `*.luau` + `*.d.ts`） | 動く |
-| DataStore の履歴・巻き戻し（CLI 側） | 動く |
-| CSV の出入り | 動く |
-| CLI（`pull` / `check` / `log` / `revert` / `export` / `import`） | 動く（実 DataStore との疎通は未確認） |
-| Studio プラグイン（表ビュー・Apply・履歴 UI） | 未実装 |
-| ランタイムの live 反映（`bind`） | 未実装 |
+| | 状態 | 確かめた範囲 |
+|---|---|---|
+| スキーマの定義（Luau / roblox-ts） | 動く | Lune で実行して検証 |
+| コード生成（`*.luau` / `*.luau` + `*.d.ts`） | 動く | 生成物を Lune で実行して検証 |
+| 履歴の計画（commit / revert / log） | 動く | 単体テスト |
+| CSV の出入り | 動く | 往復の単体テスト |
+| CLI | 実装済み | **実 DataStore との疎通は未確認** |
+| Studio プラグイン | 実装済み | コンパイルと `.rbxmx` の組み立てまで。**Studio 実機は未確認** |
+| ランタイムの live 反映（`bind`） | 実装済み | コンパイルのみ。**Studio 実機は未確認** |
+
+まだ無いもの: 列幅の変更、並べ替えと絞り込み、複数セルの範囲選択、古い blob の掃除（`rosheet gc`）。
 
 ## ライセンス
 
