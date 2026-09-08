@@ -38,21 +38,29 @@ export type Palette = {
 	danger: Color3,
 }
 
+--[[
+	色は役割で選ぶ。Dark テーマでの実測値を括弧に書いておく（Light でも役割は同じ）。
+
+	`TableItem` の Selected（Dark で #13235D の濃い青）はヘッダに使わない。あれは「選択中の行」の
+	色で、ヘッダに敷くと表全体が選択されているように見える。ヘッダは `Light`、選択は `Item` の
+	Selected に回す。readonly のセルは `TableItem` の Disabled にする —— MainBackground の
+	Disabled は背景と同じ値なので、グレーアウトが見えない。
+]]
 function Theme.palette(): Palette
 	return {
-		background = color(Enum.StudioStyleGuideColor.MainBackground),
-		surface = color(Enum.StudioStyleGuideColor.ViewPortBackground),
-		header = color(Enum.StudioStyleGuideColor.TableItem, Enum.StudioStyleGuideModifier.Selected),
-		border = color(Enum.StudioStyleGuideColor.Border),
-		text = color(Enum.StudioStyleGuideColor.MainText),
-		dimText = color(Enum.StudioStyleGuideColor.DimmedText),
+		background = color(Enum.StudioStyleGuideColor.MainBackground), -- #191A1F
+		surface = color(Enum.StudioStyleGuideColor.Titlebar), -- #202227
+		header = color(Enum.StudioStyleGuideColor.Light), -- #353741
+		border = color(Enum.StudioStyleGuideColor.Border), -- #202227
+		text = color(Enum.StudioStyleGuideColor.MainText), -- #BCBEC8
+		dimText = color(Enum.StudioStyleGuideColor.DimmedText), -- #6A6F81
 		readonlyText = color(Enum.StudioStyleGuideColor.DimmedText),
-		readonlyCell = color(Enum.StudioStyleGuideColor.MainBackground, Enum.StudioStyleGuideModifier.Disabled),
-		selected = color(Enum.StudioStyleGuideColor.TableItem, Enum.StudioStyleGuideModifier.Hover),
+		readonlyCell = color(Enum.StudioStyleGuideColor.TableItem, Enum.StudioStyleGuideModifier.Disabled), -- #272930
+		selected = color(Enum.StudioStyleGuideColor.Item, Enum.StudioStyleGuideModifier.Selected), -- #13235D
 		-- 未 Apply のセルは「まだ届いていない」ことが一目で分かる必要がある。テーマ非依存で目立たせる
 		dirty = Color3.fromRGB(226, 168, 42),
-		accent = color(Enum.StudioStyleGuideColor.LinkText),
-		danger = color(Enum.StudioStyleGuideColor.ErrorText),
+		accent = color(Enum.StudioStyleGuideColor.LinkText), -- #528BFF
+		danger = color(Enum.StudioStyleGuideColor.ErrorText), -- #E75750
 	}
 end
 

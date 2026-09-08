@@ -43,7 +43,8 @@ end
 local function loadSchema(): (Schema.Normalized?, string?)
 	local instance, problem = resolvePath(Config.schemaPath)
 	if instance == nil then
-		return nil, problem
+		-- 最初に必ずここで詰まるので、次に何をすればよいかまで書く
+		return nil, `{problem}。スキーマを宣言した ModuleScript を place に置くか、rosheet.toml の schema.path を直す`
 	end
 	if not instance:IsA("ModuleScript") then
 		return nil, `{Config.schemaPath} は ModuleScript でない`
@@ -235,6 +236,7 @@ function App._buildChrome(self: App)
 	historyLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	historyLayout.Parent = history
 
+	-- 下に出す。上に出すとツールバーのボタンを覆ってしまい、エラーが出た瞬間に何も押せなくなる
 	self.banner = Instance.new("TextLabel")
 	self.banner.BackgroundColor3 = colors.danger
 	self.banner.BorderSizePixel = 0
@@ -242,11 +244,19 @@ function App._buildChrome(self: App)
 	self.banner.TextSize = Theme.TEXT_SIZE
 	self.banner.TextColor3 = Color3.new(1, 1, 1)
 	self.banner.TextWrapped = true
-	self.banner.Size = UDim2.new(1, 0, 0, 40)
+	self.banner.TextXAlignment = Enum.TextXAlignment.Left
+	self.banner.AnchorPoint = Vector2.new(0, 1)
+	self.banner.Position = UDim2.fromScale(0, 1)
+	self.banner.Size = UDim2.new(1, 0, 0, 36)
 	self.banner.Visible = false
 	self.banner.ZIndex = 10
 	self.banner.Text = ""
 	self.banner.Parent = self.root
+
+	local bannerPadding = Instance.new("UIPadding")
+	bannerPadding.PaddingLeft = UDim.new(0, Theme.PADDING)
+	bannerPadding.PaddingRight = UDim.new(0, Theme.PADDING)
+	bannerPadding.Parent = self.banner
 end
 
 function App._say(self: App, message: string, isError: boolean)
