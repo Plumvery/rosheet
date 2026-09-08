@@ -16,6 +16,8 @@ Grid.__index = Grid
 export type Callbacks = {
 	onEdit: (rowIndex: number, columnName: string, value: any) -> boolean,
 	isDirty: (rowIndex: number, columnName: string) -> boolean,
+	-- まだ Apply していない、足したばかりの行か。キー列が readonly でもここだけは書かせる
+	isNewRow: (rowIndex: number) -> boolean,
 	onSelectRow: (rowIndex: number?) -> (),
 	onError: (message: string) -> (),
 }
@@ -47,6 +49,8 @@ export type Grid = typeof(setmetatable({} :: {
 	pool: { Row },
 	gutterLabels: { TextButton },
 	sheet: Schema.Sheet?,
+	-- 今のセルがどのシート定義で作られたか。これが変わったら行の Frame ごと作り直す
+	shape: string?,
 	value: any,
 	callbacks: Callbacks?,
 	widths: { number },
@@ -110,6 +114,40 @@ local function displayText(column: Schema.Column, value: any): string
 		return if value == true then "true" else "false"
 	end
 	return tostring(value)
+end
+
+--[[
+	行を足せる表のキー列か。readonly を行ごとに解く唯一の場所。
+
+	App.addRow は key を空にできないので `new1` のような仮の値を入れる。キー列が readonly だと
+	それを直せず、足した行は消すしかなくなる。まだ Apply していない行に限って書かせる。
+]]
+local function unlockableKey(sheet: Schema.Sheet, column: Schema.Column): boolean
+	return sheet.kind == "table" and sheet.rows == "open" and sheet.key == column.name
+end
+
+--[[
+	セルの作りに効くところを 1 本の文字列にする。名前が同じでも中身が変わったら作り直すため。
+
+	行の Frame は使い回すので、`readonly` を足したのにセルが TextBox のまま、ということが起きる。
+	セルは Column をそのまま抱える（`_columnFor`）ので、検証にしか効かない values / min / max /
+	default も、古い値を握ったままにならないようにここで見る。
+
+	区切りに \0 と \1 を使うのは、description に何が書かれていても境目が壊れないようにするため。
+]]
+local function shapeOf(sheet: Schema.Sheet): string
+	local parts: { string } = { sheet.name, sheet.kind, tostring(sheet.key), sheet.rows }
+	for _, column in sheet.columns do
+		table.insert(parts, column.name)
+		table.insert(parts, column.type)
+		table.insert(parts, tostring(column.readonly))
+		table.insert(parts, tostring(column.default))
+		table.insert(parts, column.description)
+		table.insert(parts, tostring(column.min))
+		table.insert(parts, tostring(column.max))
+		table.insert(parts, if column.values ~= nil then table.concat(column.values :: { string }, "\1") else "")
+	end
+	return table.concat(parts, "\0")
 end
 
 function Grid.new(parent: Instance): Grid
@@ -181,6 +219,7 @@ function Grid.new(parent: Instance): Grid
 		pool = {},
 		gutterLabels = {},
 		sheet = nil,
+		shape = nil,
 		value = nil,
 		callbacks = nil,
 		widths = {},
@@ -347,7 +386,13 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 
 	local cell: Cell = { frame = frame, box = nil, button = nil, label = nil, preview = nil, column = column, dynamic = false }
 
-	if column.readonly then
+	-- readonly でも、行を足せる表のキー列だけは TextBox で作る。行の Frame は使い回すので、
+	-- 新しい行が来てから TextLabel を TextBox に差し替えることはできない。実際に書けるかは
+	-- 行ごとに _writable が決め、_bindVisible が TextEditable に落とす
+	local sheet = self.sheet
+	local alwaysReadonly = column.readonly and not (sheet ~= nil and unlockableKey(sheet :: Schema.Sheet, column))
+
+	if alwaysReadonly then
 		local label = Instance.new("TextLabel")
 		label.BackgroundTransparency = 1
 		label.Size = UDim2.fromScale(1, 1)
@@ -436,6 +481,44 @@ function Grid._columnFor(self: Grid, row: Row, cell: Cell): Schema.Column?
 		return nil
 	end
 	return sheet.columns[index]
+end
+
+--[[
+	その行のその列に書き込めるか。ロック中かどうかは見ない（Apply 中はどのセルも触れないが、
+	それは「この列が readonly」とは別の話で、文字までグレーにしたいわけではない）。
+]]
+function Grid._writable(self: Grid, rowIndex: number, column: Schema.Column): boolean
+	if not column.readonly then
+		return true
+	end
+	local sheet = self.sheet
+	local callbacks = self.callbacks
+	if sheet == nil or callbacks == nil or not unlockableKey(sheet :: Schema.Sheet, column) then
+		return false
+	end
+	return callbacks.isNewRow(rowIndex)
+end
+
+--[[
+	キー列に入れようとしている値。空と重複なら理由を返す。
+
+	Rows.normalizeSheet が読み込みのときに同じ規則で落とすので、ここで止めないと Apply した
+	あとに自分の commit を読み直せなくなる。
+]]
+function Grid._keyProblem(self: Grid, rowIndex: number, column: Schema.Column, value: any): string?
+	local sheet = self.sheet
+	if sheet == nil or (sheet :: Schema.Sheet).key ~= column.name then
+		return nil
+	end
+	if value == "" then
+		return "is empty"
+	end
+	for index, row in self.value :: { { [string]: any } } do
+		if index ~= rowIndex and row[column.name] == value then
+			return `duplicate: {value}`
+		end
+	end
+	return nil
 end
 
 --[[
@@ -761,7 +844,7 @@ function Grid._pick(self: Grid, row: Row, cell: Cell)
 	local index = row.index
 	local callbacks = self.callbacks
 	local column = self:_columnFor(row, cell)
-	if index == nil or callbacks == nil or column == nil or column.readonly or self.locked then
+	if index == nil or callbacks == nil or column == nil or self.locked or not self:_writable(index, column) then
 		return
 	end
 
@@ -781,8 +864,18 @@ function Grid._commit(self: Grid, row: Row, cell: Cell)
 		return
 	end
 
+	-- 書けない列にも TextBox が居ることがある（行を足せる表のキー列）。TextEditable を切って
+	-- あるので中身は変わらないはずだが、ここでも受け取らない
+	if not self:_writable(index, column) then
+		box.Text = displayText(column, self:_cellValue(index, column.name))
+		return
+	end
+
 	local value = Schema.coerce(column, box.Text)
 	local problem = Schema.checkValue(column, value)
+	if problem == nil then
+		problem = self:_keyProblem(index, column, value)
+	end
 	if problem ~= nil then
 		callbacks.onError(`{column.name}: {problem}`)
 		box.Text = displayText(column, self:_cellValue(index, column.name))
@@ -912,6 +1005,8 @@ function Grid._bindVisible(self: Grid)
 				local isNameCell = cell.dynamic and cell.label ~= nil
 				local dirty = not isNameCell and callbacks ~= nil and callbacks.isDirty(index, column.name)
 				local text = if isNameCell then column.name else displayText(column, self:_cellValue(index, column.name))
+				-- readonly は列で決まるが、行を足せる表のキー列だけは行ごとに変わる
+				local writable = not isNameCell and self:_writable(index, column)
 
 				if cell.label ~= nil then
 					(cell.label :: TextLabel).Text = ` {text}`
@@ -922,7 +1017,8 @@ function Grid._bindVisible(self: Grid)
 					if not box:IsFocused() then
 						box.Text = text
 					end
-					box.TextEditable = not column.readonly and not self.locked
+					box.TextEditable = writable and not self.locked
+					box.TextColor3 = if writable then colors.text else colors.readonlyText
 				end
 				if cell.preview ~= nil then
 					local preview = cell.preview :: ImageLabel
@@ -934,7 +1030,7 @@ function Grid._bindVisible(self: Grid)
 					local button = cell.button :: TextButton
 					local pickable = column.type == "boolean" or column.type == "enum"
 					if cell.dynamic then
-						button.Visible = pickable and not column.readonly
+						button.Visible = pickable and writable
 					else
 						button.Text = ` {text}`
 					end
@@ -943,7 +1039,7 @@ function Grid._bindVisible(self: Grid)
 				-- 1 行おきに薄く敷く。行をまたいで目で追うときに、どのセルが同じ行かを見失わない
 				cell.frame.BackgroundColor3 = if dirty
 					then colors.dirty
-					elseif column.readonly or isNameCell then colors.readonlyCell
+					elseif not writable then colors.readonlyCell
 					elseif self.selected == index then colors.selected
 					elseif index % 2 == 0 then colors.stripe
 					else colors.background
@@ -973,9 +1069,13 @@ function Grid._layout(self: Grid)
 end
 
 function Grid.setSheet(self: Grid, sheet: Schema.Sheet, value: any, callbacks: Callbacks)
-	local changedShape = self.sheet == nil or (self.sheet :: Schema.Sheet).name ~= sheet.name
+	-- シート名だけを見ると、スキーマを直して読み直したときに古いセルが残る（列は同じ名前のまま
+	-- readonly や enum の候補だけが変わる、が一番よくある）。中身で見分ける
+	local shape = shapeOf(sheet)
+	local changedShape = self.shape ~= shape
 
 	self.sheet = sheet
+	self.shape = shape
 	self.value = value
 	self.callbacks = callbacks
 

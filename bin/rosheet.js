@@ -12,6 +12,7 @@ const generate = require("../src/generate");
 const session = require("../src/session");
 const store = require("../src/store");
 const { writePlugin, DEFAULT_PLUGIN_FILE } = require("../src/studio-plugin");
+const { writeRuntime } = require("../src/runtime");
 
 const HELP = `
 rosheet - Roblox master data: define the schema in code, edit it in Studio, bake it into the place
@@ -19,6 +20,7 @@ rosheet - Roblox master data: define the schema in code, edit it in Studio, bake
 Usage:
   rosheet init              Write ${CONFIG_FILE} into this project
   rosheet plugin            Write the Studio plugin into the local Plugins folder (install it once)
+  rosheet runtime           Copy the runtime modules (defineSchema / bind) into this project
   rosheet pull              Read the current values from the DataStore and write the generated modules
   rosheet check             Fail if the generated modules do not match the current values (for CI)
   rosheet log               Show the Apply history
@@ -31,6 +33,7 @@ Usage:
 Options:
   --csv <dir>          CSV directory for export / import (default: rosheet-csv)
   --out, -o <path>     Output path for 'plugin' (default: the Studio local Plugins folder)
+                       and for 'runtime' (default: a 'rosheet' folder next to output.dir)
   --save <file>        Write the schema to a file ('schema')
   --note <text>        Note attached to the commit ('import' / 'revert')
   --limit <n>          How many entries to show ('log', default 20)
@@ -186,6 +189,18 @@ async function cmdPlugin(argv, cwd) {
 	if (result.intoStudio) console.log("Restart Studio, or reload its plugins. Installing it once is enough.");
 }
 
+async function cmdRuntime(config, argv, cwd) {
+	const result = writeRuntime(config, { output: flag(argv, "--out", flag(argv, "-o", null)), cwd });
+	if (result.written.length === 0) {
+		console.log(`The runtime is up to date (${result.total} files): ${result.outDir}`);
+		return;
+	}
+	for (const name of result.written) console.log(`  wrote    ${name}`);
+	console.log(result.outDir);
+	// 複製なので、上げたぶんは自動では追いつかない。それがこのコマンドの唯一の弱点なので先に言う
+	console.log("Run this again after upgrading rosheet, and commit the result.");
+}
+
 async function main() {
 	const argv = process.argv;
 	const command = argv[2];
@@ -203,6 +218,8 @@ async function main() {
 
 	const config = loadConfig(cwd);
 	switch (command) {
+		case "runtime":
+			return cmdRuntime(config, argv, cwd);
 		case "pull":
 			return cmdPull(config, argv, cwd);
 		case "check":

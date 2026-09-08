@@ -61,7 +61,24 @@ return rosheet.defineSchema({
 })
 ```
 
-roblox-ts なら同じものを TypeScript で書く（`runtime/schema.d.ts` が型を持つ）。
+`rosheet` の実体は npm パッケージの `runtime/` に入っている。`require` が届く場所へ複製する:
+
+```bash
+npx rosheet runtime
+```
+
+既定では `output.dir` の隣に `rosheet/` を書く（`--out <dir>` で変えられる）。それを Rojo で place へ配線すれば（上の例では `ReplicatedStorage.Packages.rosheet`）、この 1 本の require から `defineSchema` も `bind` も取れる。片方だけなら `Packages.rosheet.schema` / `Packages.rosheet.live` と分けて require してもよい。**複製なので、rosheet を上げたら打ち直す。**
+
+**roblox-ts の場合。** `output.format = "roblox-ts"` なら `.d.ts` も一緒に置かれるので、`src/` の下へ出せばそのまま import できる:
+
+```ts
+import { bind } from "shared/rosheet/live";
+import { column, defineSchema, sheet } from "shared/rosheet/schema";
+```
+
+`node_modules/@plumvery/rosheet/runtime` を直接 import することはできない。npm スコープが typeRoots に無いと言われ、言われたとおり typeRoots に足すと、そのスコープの全パッケージが暗黙の型ライブラリになって `types` を持たないパッケージで落ちる。複製するのはそのため。
+
+ただし**スキーマの宣言そのものは rootDir の外に置く。** rbxtsc は `src/server` を ServerScriptService、`src/shared` を ReplicatedStorage へ出すが、プラグインが走査するのは ServerStorage と ReplicatedStorage で、ReplicatedStorage は本番のクライアントにまで配信される。スキーマの宣言は Luau で `src/` の外に書き、Rojo で ServerStorage へ配線する。
 
 ### 2. プラグインを入れる（一度だけ）
 
@@ -90,7 +107,7 @@ return rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "ma
 Studio で place を開き、ツールバーの rosheet を押すとウィンドウが出る。
 
 - 下のタブがシート。ヘッダ行と行番号の列は固定で、本体だけがスクロールする
-- `readonly` の列はグレーで、編集できない
+- `readonly` の列はグレーで、編集できない。ただし**足したばかりの行のキー列だけは書き換えられる**（key は空にできないので `new1` のような仮の値が入る。Apply するとグレーに戻る）
 - `boolean` と `enum` はクリックで候補が開き、選んだ値が入る。それ以外のセルは TextBox なので、Studio 上では Ctrl+C / Ctrl+V がそのまま効く
 - 編集は下書きに溜まり、変えたセルが黄色く残る。**Apply を押すまで保存先に触らない**
 - Apply を押すと 1 つの commit として積まれ、プレイテスト中なら値がその場で入れ替わる
@@ -133,6 +150,7 @@ for _, gun in Guns.rows do ... end
 |---|---|
 | `rosheet init` | `rosheet.toml` を書く |
 | `rosheet plugin` | Studio プラグインを Plugins フォルダに置く（一度だけ。何も焼き込まない） |
+| `rosheet runtime` | `defineSchema` / `bind` を持つ runtime のモジュールをプロジェクトへ複製する |
 | `rosheet pull` | DataStore の現在値を読んで生成物を書く |
 | `rosheet check` | 生成物が現在値と違えば落ちる（CI 用。誰かの Apply の取り込み忘れを捕まえる） |
 | `rosheet log` | Apply の履歴 |

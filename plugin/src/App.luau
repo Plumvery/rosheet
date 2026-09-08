@@ -74,7 +74,9 @@ local function loadSchema(): (Loaded?, string?)
 
 	local problem: string? = nil
 	for _, module in candidates do
-		local required, definition = pcall(require, module)
+		-- そのまま require すると、Rojo が Source を書き換えても古い戻り値が返り続ける
+		-- （require はインスタンス単位で恒久的にキャッシュする）。写しを読んで迂回する
+		local required, definition = Place.requireFresh(module)
 		if not required then
 			problem = `{module:GetFullName()}: require failed: {tostring(definition)}`
 			continue
@@ -155,6 +157,9 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		schema = nil :: Schema.Normalized?,
 		state = nil :: Session.State?,
 		draft = nil :: { [string]: any }?,
+		-- まだ Apply していない、足したばかりの行（シート名 → 行テーブルの集合）。行の位置では
+		-- なく実体で覚える。途中の行を消すと位置はずれるが、行そのものは同じ
+		newRows = {} :: { [string]: { [any]: boolean } },
 		-- 履歴から下書きへ読み込んだ commit。Apply したときに「何へ戻したのか」を残すため
 		restored = nil :: { seq: number, dataset: { [string]: any } }?,
 		activeSheet = 1,
@@ -439,6 +444,7 @@ function App.reload(self: App)
 
 	self.state = state
 	self.draft = Rows.cloneDataset(schema, (state :: Session.State).dataset)
+	self.newRows = {}
 	self.restored = nil
 	self.activeSheet = math.min(self.activeSheet, #schema.sheets)
 
@@ -520,6 +526,20 @@ function App._refreshGrid(self: App)
 				return true
 			end
 			return before[columnName] ~= after[columnName]
+		end,
+
+		-- キー列が readonly でも、この行の key だけは Grid に書かせる。addRow が入れる
+		-- `new1` のような仮の値は、ここが false を返すと二度と直せない
+		isNewRow = function(rowIndex: number): boolean
+			if sheet.kind ~= "table" then
+				return false
+			end
+			local added = self.newRows[sheet.name]
+			if added == nil then
+				return false
+			end
+			local row = (draft[sheet.name] :: { any })[rowIndex]
+			return row ~= nil and added[row] == true
 		end,
 
 		onSelectRow = function()
@@ -680,6 +700,7 @@ function App.discard(self: App)
 	self:_confirm(`Discard unapplied edits in {table.concat(changed, ", ")}?`, "Discard", function()
 		local schema = self.schema :: Schema.Normalized
 		self.draft = Rows.cloneDataset(schema, (self.state :: Session.State).dataset)
+		self.newRows = {}
 		self.restored = nil
 		self:_refreshGrid()
 		self:_refreshToolbar()
@@ -704,7 +725,8 @@ function App.addRow(self: App)
 	local rows = (self.draft :: { [string]: any })[sheet.name] :: { any }
 	local row = Rows.blankRow(sheet)
 	if sheet.key ~= nil then
-		-- key は空を許さないので、重複しない仮の値を入れる。すぐ書き換えられる
+		-- key は空を許さないので、重複しない仮の値を入れる。キー列が readonly でも、この行に
+		-- 限っては表から書き換えられる（Grid の isNewRow）
 		local candidate = `new{#rows + 1}`
 		local taken = true
 		local attempt = #rows + 1
@@ -723,6 +745,14 @@ function App.addRow(self: App)
 	end
 
 	table.insert(rows, row)
+
+	local added = self.newRows[sheet.name]
+	if added == nil then
+		added = {}
+		self.newRows[sheet.name] = added
+	end
+	added[row] = true
+
 	self.grid:setValue(rows)
 	self:_refreshToolbar()
 end
@@ -738,7 +768,13 @@ function App.deleteRow(self: App)
 	if rows[index] == nil then
 		return
 	end
-	table.remove(rows, index)
+	local removed = table.remove(rows, index)
+
+	local added = self.newRows[sheet.name]
+	if added ~= nil and removed ~= nil then
+		added[removed] = nil
+	end
+
 	self.grid:setValue(rows)
 	self:_refreshToolbar()
 end
@@ -927,6 +963,8 @@ function App._readInto(self: App, seq: number, pressed: TextButton?)
 		end
 
 		self.draft = dataset
+		-- 読み込んだ行はどれも過去の commit に載っていた行なので、新規行は 1 つも無い
+		self.newRows = {}
 		self:_refreshGrid()
 
 		-- 今の値と同じなら戻すものが無い。控えを持つと、このあとの編集まで「#N への巻き戻し」に
