@@ -18,7 +18,7 @@ rosheet - Roblox master data: define the schema in code, edit it in Studio, bake
 
 Usage:
   rosheet init              Write ${CONFIG_FILE} into this project
-  rosheet plugin            Generate the Studio plugin into the local Plugins folder
+  rosheet plugin            Write the Studio plugin into the local Plugins folder (install it once)
   rosheet pull              Read the current values from the DataStore and write the generated modules
   rosheet check             Fail if the generated modules do not match the current values (for CI)
   rosheet log               Show the Apply history
@@ -38,6 +38,9 @@ Options:
 Environment:
   ROSHEET_API_KEY      Open Cloud API key. Needs universe-datastores.objects:read,
                        plus :update for 'import' and 'revert'. Read from .env if present.
+
+The plugin carries no project settings: it reads the schema, the DataStore name and the
+rocas asset list from the place itself, so 'rosheet plugin' is a one-off.
 `;
 
 function flag(argv, name, fallback) {
@@ -55,19 +58,19 @@ function clientFor(config) {
 
 function reportWrite(result) {
 	if (result.written.length === 0 && result.removed.length === 0) {
-		console.log(`生成物は最新（${result.total} ファイル）: ${result.outDir}`);
+		console.log(`Generated files are up to date (${result.total} files): ${result.outDir}`);
 		return;
 	}
-	for (const name of result.written) console.log(`  書いた  ${name}`);
-	for (const name of result.removed) console.log(`  消した  ${name}`);
+	for (const name of result.written) console.log(`  wrote    ${name}`);
+	for (const name of result.removed) console.log(`  removed  ${name}`);
 	console.log(`${result.outDir}`);
 }
 
 async function cmdInit(cwd) {
 	const target = path.join(cwd, CONFIG_FILE);
-	if (existsSync(target)) throw new Error(`${CONFIG_FILE} は既にある: ${target}`);
+	if (existsSync(target)) throw new Error(`${CONFIG_FILE} already exists: ${target}`);
 	writeFileSync(target, readFileSync(path.join(__dirname, "..", "rosheet.toml.example"), "utf8"), "utf8");
-	console.log(`${CONFIG_FILE} を書いた。project.universe と output.dir を埋めてから 'rosheet plugin' を実行する`);
+	console.log(`Wrote ${CONFIG_FILE}. Fill in project.universe and output.dir, then run 'rosheet plugin'`);
 }
 
 async function cmdPull(config, argv, cwd) {
@@ -83,18 +86,18 @@ async function cmdCheck(config, cwd) {
 	const current = await session.readCurrent(clientFor(config));
 	const problems = generate.check(current.schema, current.dataset, config, cwd);
 	if (problems.length === 0) {
-		console.log(`生成物は commit #${current.head.seq} と一致している`);
+		console.log(`Generated files match commit #${current.head.seq}`);
 		return;
 	}
 	for (const problem of problems) console.error(`  ${problem}`);
-	throw new Error(`生成物が commit #${current.head.seq} と違う。'rosheet pull' を実行してコミットする`);
+	throw new Error(`Generated files do not match commit #${current.head.seq}. Run 'rosheet pull' and commit the result`);
 }
 
 async function cmdLog(config, argv) {
 	const log = await session.readLog(clientFor(config));
 	const limit = Number(flag(argv, "--limit", "20"));
 	if (log.entries.length === 0) {
-		console.log("Apply の履歴がまだ無い");
+		console.log("No Apply history yet");
 		return;
 	}
 	for (const entry of log.entries.slice(0, limit)) {
@@ -106,7 +109,7 @@ async function cmdLog(config, argv) {
 
 async function cmdRevert(config, argv, cwd) {
 	const target = Number(argv[3]);
-	if (!Number.isInteger(target) || target < 1) throw new Error("戻したい commit の番号を渡す: rosheet revert <seq>");
+	if (!Number.isInteger(target) || target < 1) throw new Error("Pass the commit to restore: rosheet revert <seq>");
 
 	const client = clientFor(config);
 	const current = await session.readCurrent(client);
@@ -115,7 +118,7 @@ async function cmdRevert(config, argv, cwd) {
 		by: "rosheet-cli",
 		note: flag(argv, "--note", `revert to #${target}`),
 	});
-	console.log(`commit #${result.commit.seq} を積んだ（#${target} の値へ戻した）`);
+	console.log(`Pushed commit #${result.commit.seq} (restored the values of #${target})`);
 
 	const after = await session.readCurrent(client);
 	reportWrite(generate.write(after.schema, after.dataset, config, cwd));
@@ -125,7 +128,7 @@ function writeCsv(current, dir) {
 	mkdirSync(dir, { recursive: true });
 	for (const sheet of current.schema.sheets)
 		writeFileSync(path.join(dir, `${sheet.name}.csv`), sheetToCsv(sheet, current.dataset[sheet.name]), "utf8");
-	console.log(`CSV を書いた: ${dir}（${current.schema.sheets.length} シート）`);
+	console.log(`Wrote CSV: ${dir} (${current.schema.sheets.length} sheets)`);
 }
 
 async function cmdExport(config, argv, cwd) {
@@ -135,7 +138,7 @@ async function cmdExport(config, argv, cwd) {
 
 async function cmdImport(config, argv, cwd) {
 	const dir = path.resolve(cwd, flag(argv, "--csv", "rosheet-csv"));
-	if (!existsSync(dir)) throw new Error(`CSV のディレクトリが無い: ${dir}`);
+	if (!existsSync(dir)) throw new Error(`No such CSV directory: ${dir}`);
 
 	const client = clientFor(config);
 	const current = await session.readCurrent(client);
@@ -156,10 +159,10 @@ async function cmdImport(config, argv, cwd) {
 		note: flag(argv, "--note", `import from ${path.basename(dir)}`),
 	});
 	if (result.changed.length === 0) {
-		console.log("CSV は現在値と同じ。commit は積まなかった");
+		console.log("The CSV matches the current values, so no commit was pushed");
 		return;
 	}
-	console.log(`commit #${result.commit.seq} を積んだ: ${result.changed.join(", ")}`);
+	console.log(`Pushed commit #${result.commit.seq}: ${result.changed.join(", ")}`);
 	reportWrite(generate.write(current.schema, normalizeDataset(current.schema, next), config, cwd));
 }
 
@@ -170,17 +173,17 @@ async function cmdSchema(config, argv, cwd) {
 		const target = path.resolve(cwd, save);
 		mkdirSync(path.dirname(target), { recursive: true });
 		writeFileSync(target, `${JSON.stringify(schema, null, "\t")}\n`, "utf8");
-		console.log(`スキーマを書いた: ${target}`);
+		console.log(`Wrote the schema: ${target}`);
 		return;
 	}
 	for (const sheet of schema.sheets)
-		console.log(`${sheet.name}  (${sheet.kind}${sheet.key === null ? "" : `, key=${sheet.key}`})  ${sheet.columns.length} 列`);
+		console.log(`${sheet.name}  (${sheet.kind}${sheet.key === null ? "" : `, key=${sheet.key}`})  ${sheet.columns.length} columns`);
 }
 
-async function cmdPlugin(config, argv, cwd) {
-	const result = writePlugin(config, { output: flag(argv, "--out", flag(argv, "-o", null)), cwd });
-	console.log(`プラグインを書いた: ${result.path}`);
-	if (result.intoStudio) console.log("Studio を再起動するか、プラグインを読み込み直す");
+async function cmdPlugin(argv, cwd) {
+	const result = writePlugin({ output: flag(argv, "--out", flag(argv, "-o", null)), cwd });
+	console.log(`Wrote the plugin: ${result.path}`);
+	if (result.intoStudio) console.log("Restart Studio, or reload its plugins. Installing it once is enough.");
 }
 
 async function main() {
@@ -195,6 +198,8 @@ async function main() {
 
 	loadEnv(cwd);
 	if (command === "init") return cmdInit(cwd);
+	// plugin は rosheet.toml を読まない。プラグインには何も焼かないので設定が要らない
+	if (command === "plugin") return cmdPlugin(argv, cwd);
 
 	const config = loadConfig(cwd);
 	switch (command) {
@@ -212,10 +217,8 @@ async function main() {
 			return cmdImport(config, argv, cwd);
 		case "schema":
 			return cmdSchema(config, argv, cwd);
-		case "plugin":
-			return cmdPlugin(config, argv, cwd);
 		default:
-			throw new Error(`知らないコマンド: ${command}（rosheet help）`);
+			throw new Error(`Unknown command: ${command} (rosheet help)`);
 	}
 }
 

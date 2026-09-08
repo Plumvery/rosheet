@@ -11,13 +11,14 @@ local Session = require(script.Parent.Session)
 local Grid = require(script.Parent.Grid)
 local Live = require(script.Parent.Live)
 local Theme = require(script.Parent.Theme)
-local Config = require(script.Parent.Config)
-local Assets = require(script.Parent.Assets)
+local Place = require(script.Parent.Place)
 
 local Players = game:GetService("Players")
 local StudioService = game:GetService("StudioService")
 
 local HISTORY_BUTTON_WIDTH = 72
+-- "Restoring..." が入る幅。押している間だけ文言が伸びるので、狭いと切れる
+local RESTORE_BUTTON_WIDTH = 88
 
 local App = {}
 App.__index = App
@@ -47,44 +48,61 @@ local function resolveAuthor()
 	end
 end
 
---[[ "ServerStorage.RosheetSchema" のような文字列を実体まで辿る ]]
-local function resolvePath(path: string): (Instance?, string?)
-	local current: Instance = game
-	for segment in string.gmatch(path, "[^%.]+") do
-		local child = current:FindFirstChild(segment)
-		if child == nil then
-			return nil, `{path}: {current:GetFullName()} has no {segment}`
-		end
-		current = child
-	end
-	return current, nil
-end
+-- スキーマモジュールが宣言していないときの DataStore 名。rosheet.toml の project.datastore の
+-- 既定と揃える。ここがズレると、CLI とプラグインが別の DataStore を見て、どちらも「値が無い」
+-- としか言えなくなる
+local DEFAULT_DATASTORE = "rosheet"
 
-local function loadSchema(): (Schema.Normalized?, string?)
-	local instance, problem = resolvePath(Config.schemaPath)
-	if instance == nil then
+type Loaded = { schema: Schema.Normalized, datastore: string, scope: string? }
+
+--[[
+	place の中からスキーマモジュールを見つけて読む。
+
+	候補を確からしい順に試し、最初に正規化まで通ったものを採る。プラグインには何も焼かないので、
+	スキーマを置き換えても、Rojo が同期し直せばそのまま拾える。
+
+	DataStore 名と scope もここで読む。プラグインが要る設定はこの 2 つだけで、どちらも
+	スキーマモジュールが宣言する。
+]]
+local function loadSchema(): (Loaded?, string?)
+	local candidates = Place.schemaModules()
+	if #candidates == 0 then
 		-- 最初に必ずここで詰まるので、次に何をすればよいかまで書く
-		return nil, `{problem}. Put the schema ModuleScript in the place, or fix schema.path in rosheet.toml`
-	end
-	if not instance:IsA("ModuleScript") then
-		return nil, `{Config.schemaPath} is not a ModuleScript`
+		return nil,
+			"No rosheet schema found. Put a ModuleScript named RosheetSchema that returns rosheet.defineSchema(...) into ServerStorage"
 	end
 
-	local required, definition = pcall(require, instance)
-	if not required then
-		return nil, `require of the schema failed: {tostring(definition)}`
+	local problem: string? = nil
+	for _, module in candidates do
+		local required, definition = pcall(require, module)
+		if not required then
+			problem = `{module:GetFullName()}: require failed: {tostring(definition)}`
+			continue
+		end
+
+		local normalized, schema = pcall(Schema.normalize, definition)
+		if not normalized then
+			problem = `{module:GetFullName()}: {tostring(schema)}`
+			continue
+		end
+
+		local named, failure = pcall(Session.checkSheetNames, schema)
+		if not named then
+			problem = `{module:GetFullName()}: {tostring(failure)}`
+			continue
+		end
+
+		local declared = definition :: { datastore: any, scope: any }
+		local datastore = if type(declared.datastore) == "string" and declared.datastore ~= ""
+			then declared.datastore
+			else DEFAULT_DATASTORE
+		local scope = if type(declared.scope) == "string" and declared.scope ~= "" then declared.scope else nil
+		return { schema = schema, datastore = datastore, scope = scope }, nil
 	end
 
-	local normalized, schema = pcall(Schema.normalize, definition)
-	if not normalized then
-		return nil, tostring(schema)
-	end
-
-	local named, failure = pcall(Session.checkSheetNames, schema)
-	if not named then
-		return nil, tostring(failure)
-	end
-	return schema, nil
+	-- 候補はあったのに、どれも読めなかった（rosheet の runtime モジュールのように、
+	-- defineSchema という語を含むだけのモジュールもここに来る）。最後の理由に一手を添える
+	return nil, `{tostring(problem)}. rosheet expects a ModuleScript that returns rosheet.defineSchema(...)`
 end
 
 -- ============================================================ UI の部品
@@ -133,6 +151,7 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		widget = widget,
 		root = root,
 		backend = nil :: Store.Backend?,
+		backendKey = nil :: string?,
 		schema = nil :: Schema.Normalized?,
 		state = nil :: Session.State?,
 		draft = nil :: { [string]: any }?,
@@ -141,11 +160,18 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		log = { entries = {} },
 		grid = nil :: any,
 		buttons = {} :: { TextButton },
+		restoreButtons = {} :: { TextButton },
+		watcher = nil :: Place.Watcher?,
 		busy = false,
+		busyLabel = nil :: string?,
 	}, App)
 
 	self:_buildChrome()
-	self.grid:setAssets(Assets)
+	-- Rojo が同期し直したら、rocas の一覧を入れ替える。プラグインを入れ直さないための経路
+	self.watcher = Place.watch(function()
+		self:_placeChanged()
+	end)
+	self:_refreshPlace()
 	-- 名前を引くのは待つので、画面を出してから別スレッドで
 	task.spawn(resolveAuthor)
 	self:reload()
@@ -238,11 +264,13 @@ function App._buildChrome(self: App)
 		self.historyButton,
 	}
 
+	-- シートのタブは一番下。スプレッドシートと同じ位置に置く
 	local tabs = Instance.new("ScrollingFrame")
 	tabs.Name = "Tabs"
 	tabs.BackgroundColor3 = colors.surface
 	tabs.BorderSizePixel = 0
-	tabs.Position = UDim2.fromOffset(0, Theme.TOOLBAR_HEIGHT)
+	tabs.AnchorPoint = Vector2.new(0, 1)
+	tabs.Position = UDim2.fromScale(0, 1)
 	tabs.Size = UDim2.new(1, 0, 0, Theme.TAB_HEIGHT)
 	tabs.CanvasSize = UDim2.new()
 	tabs.ScrollBarThickness = 4
@@ -259,7 +287,7 @@ function App._buildChrome(self: App)
 	local content = Instance.new("Frame")
 	content.Name = "Content"
 	content.BackgroundTransparency = 1
-	content.Position = UDim2.fromOffset(0, Theme.TOOLBAR_HEIGHT + Theme.TAB_HEIGHT)
+	content.Position = UDim2.fromOffset(0, Theme.TOOLBAR_HEIGHT)
 	content.Size = UDim2.new(1, 0, 1, -(Theme.TOOLBAR_HEIGHT + Theme.TAB_HEIGHT))
 	content.Parent = self.root
 	self.content = content
@@ -295,7 +323,8 @@ function App._buildChrome(self: App)
 	self.banner.TextWrapped = true
 	self.banner.TextXAlignment = Enum.TextXAlignment.Left
 	self.banner.AnchorPoint = Vector2.new(0, 1)
-	self.banner.Position = UDim2.fromScale(0, 1)
+	-- タブの上に出す。タブを覆うとシートを切り替えられなくなる
+	self.banner.Position = UDim2.new(0, 0, 1, -Theme.TAB_HEIGHT)
 	self.banner.Size = UDim2.new(1, 0, 0, 36)
 	self.banner.Visible = false
 	self.banner.ZIndex = 10
@@ -324,25 +353,73 @@ end
 
 -- ============================================================ 読み込み
 
+--[[
+	rocas の一覧を place から取り直し、次に見張るモジュールを差し替える。
+
+	一覧はプラグインに焼かない。rocas の manifest（`rocas manifest` が書き、Rojo が同期する
+	もの）をそのまま読むので、アセットを足してもプラグインは入れ直さなくてよい。
+]]
+function App._refreshPlace(self: App)
+	local assets, manifest = Place.assets()
+	self.grid:setAssets(assets)
+
+	local watched: { Instance } = {}
+	if manifest ~= nil then
+		table.insert(watched, manifest :: ModuleScript)
+	end
+	for _, module in Place.schemaModules() do
+		table.insert(watched, module)
+	end
+
+	local watcher = self.watcher
+	if watcher ~= nil then
+		(watcher :: Place.Watcher):track(watched)
+	end
+end
+
+--[[
+	Rojo が同期し直した。
+
+	スキーマは読み直さない —— 読み直すと下書きが消える。まだ読めていないときだけもう一度試す
+	（place を開いた直後で、Rojo の同期が追いついていない場合がこれ）。
+]]
+function App._placeChanged(self: App)
+	if self.root.Parent == nil then
+		return
+	end
+	self:_refreshPlace()
+	if self.schema == nil then
+		self:reload()
+	end
+end
+
 function App.reload(self: App)
-	local schema, problem = loadSchema()
-	if schema == nil then
+	local loaded, problem = loadSchema()
+	if loaded == nil then
+		-- 見つからないままにしておく。次に Rojo が同期したら _placeChanged がもう一度試す
+		self.schema = nil
 		self:_say(problem :: string, true)
 		return
 	end
-	self.schema = schema
 
-	if self.backend == nil then
-		local dataStore = Store.dataStore(Config.datastore, Config.scope)
+	local schema = loaded.schema
+	self.schema = schema
+	self:_refreshPlace()
+
+	-- スキーマが宣言する DataStore が変わったら、それまでの backend は捨てる
+	local key = `{loaded.datastore}/{loaded.scope}`
+	if self.backend == nil or self.backendKey ~= key then
+		local dataStore = Store.dataStore(loaded.datastore, loaded.scope)
 		local usable, why = Store.probe(dataStore)
 		if usable then
 			self.backend = dataStore
 		else
 			-- 公開していない place や API を入れていない環境でも触れるようにしておく。
 			-- ここで諦めると「何も出ないプラグイン」になり、原因も分からない
-			self.backend = Store.pluginSettings(self.plugin, Config.datastore)
+			self.backend = Store.pluginSettings(self.plugin, loaded.datastore)
 			self:_say(`Falling back to local storage: {why}`, true)
 		end
+		self.backendKey = key
 	end
 	local backend = self.backend :: Store.Backend
 
@@ -492,14 +569,28 @@ function App._refreshToolbar(self: App)
 	setEnabled(self.reloadButton, idle)
 	self.historyButton.Text = if self.showHistory then "History \u{25B8}" else "History"
 
+	-- 履歴の Restore も同じ。Apply / Restore の最中にもう 1 つ押せると、どちらの結果を
+	-- 見ているのか分からなくなる
+	for _, restore in self.restoreButtons do
+		setEnabled(restore, idle)
+	end
+
 	local backend = self.backend :: Store.Backend
 	local where = if Live.isPlaying() then " \u{00B7} playing" else ""
-	self.status.Text = `#{state.head} \u{00B7} {backend.label}{where}`
+	self.status.Text = if self.busyLabel ~= nil
+		then self.busyLabel :: string
+		else `#{state.head} \u{00B7} {backend.label}{where}`
 end
 
---[[ Apply の最中は表もツールバーも触らせない。触れると送っている内容と画面が食い違う ]]
-function App._setBusy(self: App, busy: boolean)
+--[[
+	Apply / Restore の最中は表もツールバーも触らせない。触れると送っている内容と画面が食い違う。
+
+	`label` を渡すと、終わるまでステータス行に出したままにする。DataStore の読み書きは数秒
+	かかることがあり、何も出ないと「もう終わったのか、まだなのか」が分からない。
+]]
+function App._setBusy(self: App, busy: boolean, label: string?)
 	self.busy = busy
+	self.busyLabel = if busy then label else nil
 	self.grid:setLocked(busy)
 	self:_refreshToolbar()
 end
@@ -659,7 +750,7 @@ function App.apply(self: App)
 		return
 	end
 
-	self:_setBusy(true)
+	self:_setBusy(true, "Applying...")
 
 	task.spawn(function()
 		local backend = self.backend :: Store.Backend
@@ -667,21 +758,26 @@ function App.apply(self: App)
 		local ok, result =
 			Session.apply(backend, schema, self.state :: Session.State, self.draft :: any, { at = DateTime.now():ToIsoDate(), by = author, note = "" })
 
-		self:_setBusy(false)
 		if not ok then
+			self:_setBusy(false)
 			self:_say(`Apply failed: {tostring(result)}`, true)
 			return
 		end
 
 		local commit = result :: Session.Commit
 		Live.publish(schema, self.draft :: any, commit.seq)
+		-- 読み直しまで busy のまま。ここで先に解除すると、画面がまだ古いうちに押せてしまい、
+		-- 直後に表が入れ替わる
 		self:reload()
+		self:_setBusy(false)
 		self:_say(`Applied #{commit.seq}: {table.concat(changed, ", ")}`, false)
 	end)
 end
 
 function App._refreshHistory(self: App)
 	self.history.Visible = self.showHistory
+	-- 作り直すので前のボタンは忘れる。消したボタンをグレーアウトしに行かないように
+	self.restoreButtons = {}
 	if not self.showHistory then
 		return
 	end
@@ -705,7 +801,7 @@ function App._refreshHistory(self: App)
 		local title = Instance.new("TextLabel")
 		title.BackgroundTransparency = 1
 		title.Position = UDim2.fromOffset(6, 2)
-		title.Size = UDim2.new(1, -70, 0, 18)
+		title.Size = UDim2.new(1, -(RESTORE_BUTTON_WIDTH + 18), 0, 18)
 		title.Font = Theme.FONT
 		title.TextSize = Theme.TEXT_SIZE
 		title.TextColor3 = colors.text
@@ -718,7 +814,7 @@ function App._refreshHistory(self: App)
 		local detail = Instance.new("TextLabel")
 		detail.BackgroundTransparency = 1
 		detail.Position = UDim2.fromOffset(6, 20)
-		detail.Size = UDim2.new(1, -70, 0, 30)
+		detail.Size = UDim2.new(1, -(RESTORE_BUTTON_WIDTH + 18), 0, 30)
 		detail.Font = Theme.FONT
 		detail.TextSize = Theme.TEXT_SIZE - 2
 		detail.TextColor3 = colors.dimText
@@ -729,12 +825,13 @@ function App._refreshHistory(self: App)
 		detail.Text = `{entry.at or "?"}  ·  {who}\n{table.concat(entry.changed, ", ")}`
 		detail.Parent = card
 
-		local restore = button(card, "Restore", 52)
+		local restore = button(card, "Restore", RESTORE_BUTTON_WIDTH)
 		restore.AnchorPoint = Vector2.new(1, 0.5)
 		restore.Position = UDim2.new(1, -6, 0.5, 0)
 		restore.Activated:Connect(function()
-			self:revertTo(entry.seq)
+			self:revertTo(entry.seq, restore)
 		end)
+		table.insert(self.restoreButtons, restore)
 
 		height += 54
 	end
@@ -742,7 +839,7 @@ function App._refreshHistory(self: App)
 	self.history.CanvasSize = UDim2.fromOffset(0, height)
 end
 
-function App.revertTo(self: App, seq: number)
+function App.revertTo(self: App, seq: number, pressed: TextButton?)
 	if self.busy then
 		return
 	end
@@ -751,32 +848,43 @@ function App.revertTo(self: App, seq: number)
 		return
 	end
 
-	self.busy = true
+	-- Apply と同じ扱い。終わるまで表もツールバーも履歴も触らせない
+	self:_setBusy(true, `Restoring #{seq}...`)
+	if pressed ~= nil then
+		(pressed :: TextButton).Text = "Restoring..."
+	end
+
 	task.spawn(function()
 		local backend = self.backend :: Store.Backend
 		local found, target = Session.readCommit(backend, seq)
 		if not found or target == nil then
-			self.busy = false
+			self:_setBusy(false)
 			self:_say(`Could not read commit #{seq}`, true)
 			return
 		end
 
 		local ok, result = Session.revert(backend, self.state :: Session.State, target, { at = DateTime.now():ToIsoDate(), by = author, note = nil })
-		self.busy = false
 		if not ok then
+			self:_setBusy(false)
 			self:_say(`Restore failed: {tostring(result)}`, true)
 			return
 		end
 
-		self:_say(`Restored the values of #{seq} as #{(result :: Session.Commit).seq}`, false)
+		-- 読み直しと live への配信まで済ませてから解除する
 		self:reload()
-
 		local schema = self.schema :: Schema.Normalized
 		Live.publish(schema, (self.state :: Session.State).dataset, (result :: Session.Commit).seq)
+		self:_setBusy(false)
+		self:_say(`Restored the values of #{seq} as #{(result :: Session.Commit).seq}`, false)
 	end)
 end
 
 function App.destroy(self: App)
+	local watcher = self.watcher
+	if watcher ~= nil then
+		(watcher :: Place.Watcher):destroy()
+		self.watcher = nil
+	end
 	if self.grid ~= nil then
 		self.grid:destroy()
 	end

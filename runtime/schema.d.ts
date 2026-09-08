@@ -37,10 +37,18 @@ export interface Sheet {
 	readonly columns: readonly Column[];
 }
 
+export interface DefinitionOptions {
+	/** プラグインが読み書きする DataStore 名（既定: "rosheet"） */
+	readonly datastore?: string;
+	readonly scope?: string;
+}
+
 export interface Definition {
 	readonly sheets: readonly Sheet[];
+	readonly datastore?: string;
+	readonly scope?: string;
 }
 
 export declare function column(name: string, columnType: ColumnType, options?: ColumnOptions): Column;
 export declare function sheet(name: string, options: SheetOptions): Sheet;
-export declare function defineSchema(sheets: readonly Sheet[]): Definition;
+export declare function defineSchema(sheets: readonly Sheet[], options?: DefinitionOptions): Definition;

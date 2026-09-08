@@ -71,14 +71,14 @@ function check(schema, dataset, config, cwd = process.cwd()) {
 	for (const file of files) {
 		const target = path.join(outDir, file.name);
 		if (!existsSync(target)) {
-			problems.push(`${file.name}: 生成物が無い`);
+			problems.push(`${file.name}: missing`);
 			continue;
 		}
-		if (normalizeEol(readFileSync(target, "utf8")) !== file.content) problems.push(`${file.name}: 生成物が現在の値と違う`);
+		if (normalizeEol(readFileSync(target, "utf8")) !== file.content) problems.push(`${file.name}: does not match the current values`);
 	}
 
 	for (const name of staleFiles(outDir, new Set(files.map((file) => file.name))))
-		problems.push(`${name}: スキーマに無いシートの生成物が残っている`);
+		problems.push(`${name}: left over from a sheet the schema no longer has`);
 
 	return problems;
 }

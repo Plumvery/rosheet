@@ -3,8 +3,9 @@
 # 編集の正は Studio プラグイン + DataStore、出荷の正はここで指定した生成物。
 #
 # 初回セットアップ:
-#   1. スキーマを宣言する ModuleScript を書き、place の中に置く（schema.path が指す場所）
-#   2. npx rosheet plugin        # Studio の Plugins フォルダにプラグインを置く
+#   1. スキーマを宣言する ModuleScript を書き、place の ServerStorage に RosheetSchema として置く
+#      （プラグインが ServerStorage / ReplicatedStorage を走査して見つける）
+#   2. npx rosheet plugin        # Studio の Plugins フォルダにプラグインを置く（一度だけ）
 #   3. Studio で place を開く    # File > Experience Settings > Security で
 #                                # "Enable Studio Access to API Services" を入れておく
 #   4. プラグインでシートを編集して Apply
@@ -15,15 +16,13 @@
 # 見るので、この値はプラグインには要らない（CLI の pull / check / import 専用）
 universe = 0
 
-# DataStore 名。プレイヤーのデータと絶対にぶつからない名前にする
+# DataStore 名。プレイヤーのデータと絶対にぶつからない名前にする。
+# 既定から変えるなら、スキーマモジュール側にも同じ値を書く:
+#   rosheet.defineSchema({ ... }, { datastore = "...", scope = "..." })
+# CLI はここを読み、Studio プラグインはスキーマモジュールを読む
 datastore = "rosheet"
 
 # scope = "master"
-
-[schema]
-# プラグインが require するスキーマモジュールの place 内での場所。
-# ReplicatedStorage には置かない（本番のクライアントにまで配信されるため）
-path = "ServerStorage.RosheetSchema"
 
 [output]
 # "luau" なら *.luau（--!strict）、"roblox-ts" なら *.luau + *.d.ts

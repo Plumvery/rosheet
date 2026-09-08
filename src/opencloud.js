@@ -23,7 +23,7 @@ class OpenCloudError extends Error {
 function requireApiKey(env = process.env) {
 	const key = env.ROSHEET_API_KEY ?? env.ROBLOX_API_KEY;
 	if (key === undefined || key === "")
-		throw new OpenCloudError("Open Cloud の API キーが無い。ROSHEET_API_KEY を .env か環境変数で渡す");
+		throw new OpenCloudError("No Open Cloud API key. Pass ROSHEET_API_KEY in .env or the environment");
 	return key;
 }
 
@@ -33,7 +33,7 @@ function sleep(ms) {
 
 /** キーは URL のパスに入るので、`/` を含むキーはここに来る前に弾いておく（src/store.js の形の約束） */
 function entryUrl(universe, datastore, key) {
-	if (key.includes("/")) throw new OpenCloudError(`キーに / を含められない: ${key}`);
+	if (key.includes("/")) throw new OpenCloudError(`A key cannot contain /: ${key}`);
 	return `${BASE}/universes/${universe}/data-stores/${encodeURIComponent(datastore)}/entries/${encodeURIComponent(key)}`;
 }
 
@@ -64,13 +64,13 @@ async function request(url, init, apiKey) {
 			await sleep(500 * 2 ** (attempt - 1));
 			continue;
 		}
-		throw new OpenCloudError(`${init.method ?? "GET"} ${url} が ${response.status}: ${body.slice(0, 400)}`, response.status);
+		throw new OpenCloudError(`${init.method ?? "GET"} ${url} returned ${response.status}: ${body.slice(0, 400)}`, response.status);
 	}
 	throw lastError;
 }
 
 function createClient({ universe, datastore, apiKey = requireApiKey() }) {
-	if (universe === undefined) throw new OpenCloudError("rosheet.toml の project.universe が無い");
+	if (universe === undefined) throw new OpenCloudError("project.universe is missing from rosheet.toml");
 
 	return {
 		/** 無いキーは null。値は必ず JSON 文字列として置いてあるので、ここで一段ほどく */
@@ -78,7 +78,7 @@ function createClient({ universe, datastore, apiKey = requireApiKey() }) {
 			const entry = await request(entryUrl(universe, datastore, key), { method: "GET" }, apiKey);
 			if (entry === undefined) return null;
 			if (typeof entry.value !== "string")
-				throw new OpenCloudError(`${key}: rosheet が置いた値でない（JSON 文字列でない）`, null);
+				throw new OpenCloudError(`${key}: not a value rosheet wrote (not a JSON string)`, null);
 			return JSON.parse(entry.value);
 		},
 
