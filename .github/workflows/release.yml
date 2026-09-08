@@ -1,0 +1,76 @@
+name: release
+
+# v* のタグを push すると、テストを通してから GitHub Release を作る。
+# 本文は CHANGELOG.md のそのバージョンの節をそのまま使う。
+#
+# GitHub の UI から Release を publish した場合（タグもそこで作られる）は、
+# 同じ検査だけ走らせる。Release は既にあるので作り直さないし、本文も触らない。
+#
+# npm へは出さない。公開する段になったら、ここに publish の job を足す。
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+
+jobs:
+  # ci.yml をそのまま呼ぶ。タグの中身に対して node と Luau のテストが走る。
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Release の作成に要る。
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # release から起動したときは、その時点のタグを確実に取る。
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          tag='${{ github.event.release.tag_name || github.ref_name }}'
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # タグと package.json がずれたままリリースしないための門番。
+      # 例: v0.2.0 のタグなのに package.json が 0.1.0 のまま、を止める。
+      - name: Check the tag matches package.json
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          if [ '${{ steps.tag.outputs.version }}' != "$pkg" ]; then
+            echo "::error::release tag ${{ steps.tag.outputs.tag }} does not match package.json $pkg"
+            exit 1
+          fi
+
+      # CHANGELOG の [Unreleased] をバージョンに書き換え忘れたまま
+      # タグを切ると、ここで落ちる。
+      - name: Take the release notes from CHANGELOG.md
+        run: |
+          awk -v version='${{ steps.tag.outputs.version }}' '
+            index($0, "## [" version "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for ${{ steps.tag.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Create the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag='${{ steps.tag.outputs.tag }}'
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "::notice::release $tag already exists; leaving it as it is"
+            exit 0
+          fi
+          gh release create "$tag" --title "$tag" --notes-file notes.md
