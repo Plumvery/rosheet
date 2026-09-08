@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml から、タグの中身に対して同じテストを回すために呼ばれる。
+  workflow_call:
 
 jobs:
   test:
