@@ -190,10 +190,16 @@ function Store.probe(backend: Backend): (boolean, string?)
 	end
 
 	local message = result.error
-	if string.find(message, "StudioAccessToApisNotAllowed", 1, true) ~= nil then
+	-- 実測すると 2 通り返る。エンジンからの `StudioAccessToApisNotAllowed` と、
+	-- API Services からの `502 ... Reason: Studio access to APIs is not allowed.`。
+	-- 片方だけ見ていると、もう片方のときに生の 502 が出るだけで次の手が分からない
+	local lowered = string.lower(message)
+	local blocked = string.find(lowered, "studioaccesstoapisnotallowed", 1, true) ~= nil
+		or string.find(lowered, "studio access to apis is not allowed", 1, true) ~= nil
+	if blocked then
 		return false,
-			"Studio から API を叩けない。File > Experience Settings > Security の "
-				.. '"Enable Studio Access to API Services" を入れて、place を公開しておく'
+			"Studio から API を叩けない。File > Game Settings > Security の "
+				.. '"Enable Studio Access to API Services" を入れる（place の公開も要る）'
 	end
 	return false, message
 end
