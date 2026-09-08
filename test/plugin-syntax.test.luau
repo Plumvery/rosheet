@@ -7,7 +7,7 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local process = require("@lune/process")
 
-local DIRECTORIES = { "plugin/src", "runtime" }
+local DIRECTORIES = { "plugin/src", "runtime", "example" }
 
 local failures = 0
 local checked = 0

@@ -103,7 +103,7 @@ function generateLuau(sheet, value, options = {}) {
 	// 行ごとに freeze するのは、配列だけ freeze しても中の行は書き換えられてしまうため
 	lines.push("for _, row in rows do", "\ttable.freeze(row)", "end", "table.freeze(rows)", "");
 
-	if (sheet.key === null) {
+	if (sheet.key === undefined) {
 		lines.push("return table.freeze({", "\trows = rows,", "})", "");
 		return lines.join("\n");
 	}
@@ -154,7 +154,7 @@ function generateDts(sheet) {
 	}
 
 	lines.push("export declare const rows: readonly Row[];");
-	if (sheet.key !== null) {
+	if (sheet.key !== undefined) {
 		const index = `by${pascal(sheet.key)}`;
 		lines.push(`export declare const ${index}: { readonly [${sheet.key}: string]: Row | undefined };`);
 		lines.push(`export declare function get(${sheet.key}: string): Row | undefined;`);

@@ -60,14 +60,15 @@ function normalizeSheetValue(sheet, raw) {
 		return row;
 	}
 
-	// Roblox の JSONEncode は空のテーブルを `{}` と `[]` のどちらで書くか場面で変わる。
-	// 空の表がここで落ちると「行を全部消したら二度と読めない」という壊れ方をする
+	// Studio の JSONEncode は空テーブルを `[]` にするので、ここは本来通る（実測）。
+	// それでも受けるのは、空の表がここで落ちると「行を全部消したら二度と読めない」という
+	// 直しようのない壊れ方になるため。CSV や手書きの JSON から来る経路もある
 	const source = raw === undefined || raw === null ? [] : raw;
 	const list = !Array.isArray(source) && typeof source === "object" && Object.keys(source).length === 0 ? [] : source;
 	if (!Array.isArray(list)) fail(`sheet ${sheet.name}`, "表の値は配列でなければならない");
 
 	const rows = list.map((row, index) => normalizeRow(sheet, row, `sheet ${sheet.name}[${index}]`));
-	if (sheet.key !== null) {
+	if (sheet.key !== undefined) {
 		const seen = new Set();
 		rows.forEach((row, index) => {
 			const key = row[sheet.key];

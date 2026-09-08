@@ -1,0 +1,12 @@
+# example/ を使うときの設定。universe は自分のテストプレイスのものに置き換える。
+
+[project]
+universe = 0
+datastore = "rosheet"
+
+[schema]
+path = "ServerStorage.RosheetSchema"
+
+[output]
+format = "luau"
+dir = "example/generated"

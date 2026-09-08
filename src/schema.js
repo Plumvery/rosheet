@@ -106,18 +106,19 @@ function normalizeSheet(raw, where) {
 	};
 
 	if (kind === "table") {
-		// key を持たない表も許す（スピンホイールの景品のように並び順そのものが意味を持つ表がある）
-		const key = raw.key === undefined || raw.key === null ? null : raw.key;
-		if (key !== null) {
+		// key を持たない表も許す（スピンホイールの景品のように並び順そのものが意味を持つ表がある）。
+		// key が無いときは `key` を持たせない。Luau 側の nil は JSON から消えるので、null を
+		// 入れるとプラグインが置いたスキーマと CLI が作るスキーマがバイト単位でずれる
+		const key = raw.key === undefined || raw.key === null ? undefined : raw.key;
+		if (key !== undefined) {
 			const keyColumn = columns.find((column) => column.name === key);
 			if (keyColumn === undefined) fail(at, `key に指定された列が無い: ${key}`);
 			if (keyColumn.type !== "string") fail(at, `key の列は string でなければならない: ${key} は ${keyColumn.type}`);
+			sheet.key = key;
 		}
-		sheet.key = key;
 		sheet.rows = raw.rows === "fixed" ? "fixed" : "open";
 	} else {
 		// scalars は 1 列 = 1 定数で、行の増減という概念が無い
-		sheet.key = null;
 		sheet.rows = "fixed";
 	}
 
