@@ -1,6 +1,7 @@
 name: release
 
-# v* のタグを push すると、テストを通してから GitHub Release を作る。
+# v* のタグを push すると、テストを通してから GitHub Release を作り、Studio
+# プラグインのインストーラーをそのリリースへ添付する。
 # 本文は CHANGELOG.md のそのバージョンの節をそのまま使う。
 #
 # GitHub の UI から Release を publish した場合（タグもそこで作られる）は、
@@ -63,6 +64,15 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # npm を触らない人向けの導線。ダブルクリックで Studio の Plugins フォルダへ
+      # プラグインを置くだけのスクリプトを、リリースのアセットとして配る。
+      - name: Build the double-click installers
+        run: node scripts/build-installers.js
+
       - name: Create the release
         if: github.event_name == 'push'
         env:
@@ -71,6 +81,17 @@ jobs:
           tag='${{ steps.tag.outputs.tag }}'
           if gh release view "$tag" > /dev/null 2>&1; then
             echo "::notice::release $tag already exists; leaving it as it is"
-            exit 0
+          else
+            gh release create "$tag" --title "$tag" --notes-file notes.md
           fi
-          gh release create "$tag" --title "$tag" --notes-file notes.md
+
+      # --clobber: リリースを作り直したときに、古いアセットへ上書きする。
+      - name: Attach the installers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload '${{ steps.tag.outputs.tag }}' \
+            dist/rosheet-plugin-installer-windows.cmd \
+            dist/rosheet-plugin-installer-macos.zip \
+            dist/rosheet.rbxmx \
+            --clobber

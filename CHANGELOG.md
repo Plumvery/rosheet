@@ -9,6 +9,7 @@
 
 ### Added
 
+- **ダブルクリックで入るプラグインのインストーラーを、各 Release に添付する。** プラグインを入れるのに Node と npm を入れて `rosheet plugin` を叩く必要があり、値を触るだけの人に求めるには重かった。`scripts/build-installers.js` が `rosheet-plugin-installer-windows.cmd` と `rosheet-plugin-installer-macos.zip` を組み立て、リリースの workflow が添付する。プラグインには何も焼き込まないので、`.rbxmx` を base64 で各インストーラーの中に抱えられる。置き先とファイル名は `rosheet plugin` と同じで、インストール時に通信しない。macOS 版を zip で包むのは、Release のアセットにパーミッションが残らず、実行ビットの落ちた `.command` はダブルクリックできないため。`rosheet.rbxmx` 単体も、手で置きたい人向けに添付する。
 - スキーマをコードで定義する（Luau / roblox-ts）。列の型・readonly・既定値・enum の候補・数値の範囲を宣言し、Luau 側と JS 側で同じ正規形に落ちることをテストで検査している。
 - Studio プラグイン。宣言したシートごとに表ビューを出し、編集できる列だけ編集させ、Apply でプレイテスト中の値を差し替える。設定もスキーマもアセット一覧も焼き込まず、place の中から読む。
 - DataStore を編集の正とする履歴。1 回の Apply が 1 つの commit として積まれ、`log` で一覧、`revert` で任意の時点へ戻す commit を積める。
