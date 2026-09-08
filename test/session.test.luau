@@ -165,13 +165,24 @@ check("変化が無ければ commit を積まない", applied3 and commit3 == ni
 check("そのとき書き込みも起きない", fake.writes == before)
 
 -- ============================================================ 巻き戻し
+--
+-- 昔の commit を読んで下書きに入れ、それを Apply し直す。プラグインの Restore と同じ手順。
 
 local found, target = Session.readCommit(backend, 1)
 check("過去の commit を読める", found and target.seq == 1)
 
-local reverted, commit4 = Session.revert(backend, state2, target, { at = "2026-09-08T00:00:00Z", by = "tester" })
+local restored, restoredDataset = Session.readDataset(backend, schema, target)
+check("過去の commit の値を読める", restored and restoredDataset.guns[1].damage == 34)
+
+local reverted, commit4 = Session.apply(
+	backend,
+	schema,
+	state2,
+	restoredDataset,
+	{ at = "2026-09-08T00:00:00Z", by = "tester", note = "revert of #1", revertOf = 1 }
+)
 check("巻き戻しが新しい commit として積まれる", reverted and commit4.seq == 3 and commit4.revertOf == 1)
-check("巻き戻しは blob を作らない", fake.data["blob.000003.guns"] == nil)
+check("戻した値を持つシートだけ blob を作る", reverted and commit4.sheets.guns == 3 and commit4.sheets.round == 1)
 
 local read3, state3 = Session.readCurrent(backend, schema)
 check("巻き戻した値が戻っている", read3 and state3.dataset.guns[1].damage == 34, if read3 then tostring(state3.dataset.guns[1].damage) else nil)
@@ -209,6 +220,37 @@ local logged, log = Session.readLog(backend)
 check("履歴が新しい順に並ぶ", logged and log.entries[1].seq == 4 and log.entries[#log.entries].seq == 1)
 check("履歴に変えたシートが残る", logged and table.concat(log.entries[3].changed, ",") == "guns")
 check("巻き戻しは履歴に revertOf を残す", logged and log.entries[2].revertOf == 1)
+
+-- ============================================================ 何を変えたのかの要約
+
+local read4, state4 = Session.readCurrent(backend, schema)
+local draft5 = Rows.cloneDataset(schema, state4.dataset)
+draft5.guns[1].damage = 7
+local added = Rows.blankRow(schema.sheets[1])
+added.id = "NEW"
+table.insert(draft5.guns, added)
+draft5.round.SECONDS = 90
+
+local summary = Rows.summarize(schema, state4.dataset, draft5)
+check("足した行と直した行を分けて数える", read4 and summary == "guns +1 ~1, round ~1", summary)
+check("消した行は -", (function()
+	local shorter = Rows.cloneDataset(schema, state4.dataset)
+	table.remove(shorter.guns, 1)
+	return Rows.summarize(schema, state4.dataset, shorter) == "guns -1"
+end)())
+check("変化が無ければ空", Rows.summarize(schema, state4.dataset, Rows.cloneDataset(schema, state4.dataset)) == "")
+
+local applied6, commit6 = Session.apply(
+	backend,
+	schema,
+	state4,
+	draft5,
+	{ at = "2026-09-08T00:00:00Z", by = "tester", note = "revert of #1 · guns +1 ~1", revertOf = 1 }
+)
+check("Apply が revertOf と note を残す", applied6 and commit6.revertOf == 1 and commit6.note == "revert of #1 · guns +1 ~1")
+
+local logged3, log3 = Session.readLog(backend)
+check("履歴にも note が残る", logged3 and log3.entries[1].note == "revert of #1 · guns +1 ~1")
 
 print(`\n{if failures == 0 then "all ok" else `{failures} failed`}`)
 if failures > 0 then

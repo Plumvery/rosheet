@@ -106,7 +106,7 @@ function Session.readHead(backend: Backend): (boolean, any)
 end
 
 --[[ commit が指す blob を集めてデータセットに戻す ]]
-local function readDataset(
+function Session.readDataset(
 	backend: Backend,
 	schema: Schema.Normalized,
 	commit: Commit
@@ -157,7 +157,7 @@ function Session.readCurrent(backend: Backend, schema: Schema.Normalized): (bool
 			return false, commit
 		end
 		if commit ~= nil then
-			local read, dataset = readDataset(backend, schema, commit)
+			local read, dataset = Session.readDataset(backend, schema, commit)
 			if not read then
 				return false, dataset
 			end
@@ -251,7 +251,7 @@ function Session.apply(
 	schema: Schema.Normalized,
 	state: State,
 	next: { [string]: Rows.SheetValue },
-	meta: { at: string, by: string, note: string? }
+	meta: { at: string, by: string, note: string?, revertOf: number? }
 ): (boolean, any)
 	local changed: { string } = {}
 	for _, sheet in schema.sheets do
@@ -289,47 +289,11 @@ function Session.apply(
 		by = meta.by,
 		note = if meta.note == nil then "" else meta.note,
 		sheets = sheets,
+		-- 履歴の Restore から来た Apply は、どの commit へ戻したのかをここに残す
+		revertOf = meta.revertOf,
 	}
 
 	return writeCommit(backend, commit, blobs, changed)
-end
-
---[[
-	巻き戻し。昔の commit と同じ中身を指す新しい commit を積む。blob は既にあるので書かない。
-	履歴を書き換えないので、戻したあとにさらに戻れる。
-]]
-function Session.revert(
-	backend: Backend,
-	state: State,
-	target: Commit,
-	meta: { at: string, by: string, note: string? }
-): (boolean, any)
-	if target.seq == 0 then
-		return false, "Commit #0 is a sentinel and cannot be restored"
-	end
-
-	local reserved, seq = reserve(backend, state.head)
-	if not reserved then
-		return false, seq
-	end
-
-	local changed: { string } = {}
-	for name in target.sheets do
-		table.insert(changed, name)
-	end
-	table.sort(changed)
-
-	local commit: Commit = {
-		seq = seq,
-		parent = state.head,
-		at = meta.at,
-		by = meta.by,
-		note = if meta.note == nil then `revert to #{target.seq}` else meta.note,
-		sheets = table.clone(target.sheets),
-		revertOf = target.seq,
-	}
-
-	return writeCommit(backend, commit, {}, changed)
 end
 
 Session.HEAD_KEY = HEAD_KEY

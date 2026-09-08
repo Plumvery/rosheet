@@ -155,6 +155,8 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		schema = nil :: Schema.Normalized?,
 		state = nil :: Session.State?,
 		draft = nil :: { [string]: any }?,
+		-- 履歴から下書きへ読み込んだ commit。Apply したときに「何へ戻したのか」を残すため
+		restored = nil :: { seq: number, dataset: { [string]: any } }?,
 		activeSheet = 1,
 		showHistory = false,
 		log = { entries = {} },
@@ -437,6 +439,7 @@ function App.reload(self: App)
 
 	self.state = state
 	self.draft = Rows.cloneDataset(schema, (state :: Session.State).dataset)
+	self.restored = nil
 	self.activeSheet = math.min(self.activeSheet, #schema.sheets)
 
 	local logged, log = Session.readLog(backend)
@@ -677,6 +680,7 @@ function App.discard(self: App)
 	self:_confirm(`Discard unapplied edits in {table.concat(changed, ", ")}?`, "Discard", function()
 		local schema = self.schema :: Schema.Normalized
 		self.draft = Rows.cloneDataset(schema, (self.state :: Session.State).dataset)
+		self.restored = nil
 		self:_refreshGrid()
 		self:_refreshToolbar()
 	end)
@@ -755,8 +759,29 @@ function App.apply(self: App)
 	task.spawn(function()
 		local backend = self.backend :: Store.Backend
 		local schema = self.schema :: Schema.Normalized
-		local ok, result =
-			Session.apply(backend, schema, self.state :: Session.State, self.draft :: any, { at = DateTime.now():ToIsoDate(), by = author, note = "" })
+
+		-- 何を変えたのかを commit に残す。Restore から来た下書きは、戻した時点との差を書く
+		-- （head との差にすると巻き戻しそのものが変更として並び、戻したあとに何を足したのかが読めない）
+		local restored = self.restored
+		local baseline = if restored == nil
+			then (self.state :: Session.State).dataset
+			else (restored :: any).dataset
+		local summary = Rows.summarize(schema, baseline, self.draft :: any)
+
+		local note = summary
+		local revertOf: number? = nil
+		if restored ~= nil then
+			revertOf = (restored :: any).seq
+			note = if summary == "" then `revert of #{revertOf}` else `revert of #{revertOf} · {summary}`
+		end
+
+		local ok, result = Session.apply(
+			backend,
+			schema,
+			self.state :: Session.State,
+			self.draft :: any,
+			{ at = DateTime.now():ToIsoDate(), by = author, note = note, revertOf = revertOf }
+		)
 
 		if not ok then
 			self:_setBusy(false)
@@ -794,7 +819,7 @@ function App._refreshHistory(self: App)
 		local card = Instance.new("Frame")
 		card.BackgroundColor3 = colors.background
 		card.BorderSizePixel = 0
-		card.Size = UDim2.new(1, -8, 0, 52)
+		card.Size = UDim2.new(1, -8, 0, 64)
 		card.LayoutOrder = order
 		card.Parent = self.history
 
@@ -814,7 +839,7 @@ function App._refreshHistory(self: App)
 		local detail = Instance.new("TextLabel")
 		detail.BackgroundTransparency = 1
 		detail.Position = UDim2.fromOffset(6, 20)
-		detail.Size = UDim2.new(1, -(RESTORE_BUTTON_WIDTH + 18), 0, 30)
+		detail.Size = UDim2.new(1, -(RESTORE_BUTTON_WIDTH + 18), 0, 42)
 		detail.Font = Theme.FONT
 		detail.TextSize = Theme.TEXT_SIZE - 2
 		detail.TextColor3 = colors.dimText
@@ -822,60 +847,103 @@ function App._refreshHistory(self: App)
 		detail.TextYAlignment = Enum.TextYAlignment.Top
 		detail.TextWrapped = true
 		local who = if entry.by ~= nil and entry.by ~= "" then entry.by else "?"
-		detail.Text = `{entry.at or "?"}  ·  {who}\n{table.concat(entry.changed, ", ")}`
+		-- note に何を変えたのかが入る。note を書いていなかった頃の履歴はシート名だけ出す
+		local what = if entry.note ~= nil and entry.note ~= "" then entry.note else table.concat(entry.changed, ", ")
+		detail.Text = `{entry.at or "?"}  ·  {who}\n{what}`
 		detail.Parent = card
 
 		local restore = button(card, "Restore", RESTORE_BUTTON_WIDTH)
 		restore.AnchorPoint = Vector2.new(1, 0.5)
 		restore.Position = UDim2.new(1, -6, 0.5, 0)
 		restore.Activated:Connect(function()
-			self:revertTo(entry.seq, restore)
+			self:restore(entry.seq, restore)
 		end)
 		table.insert(self.restoreButtons, restore)
 
-		height += 54
+		height += 66
 	end
 
 	self.history.CanvasSize = UDim2.fromOffset(0, height)
 end
 
-function App.revertTo(self: App, seq: number, pressed: TextButton?)
+--[[
+	履歴の Restore。保存先には触らず、その commit の値を下書きへ読み込むだけ。
+
+	読み込んだ値は他の編集と同じ黄色い下書きとして出るので、Apply を押せば新しい commit として
+	積まれ、Discard を押せば戻す前の状態に返る。押した瞬間に書かないぶん、戻した中身を見てから
+	決められる。
+]]
+function App.restore(self: App, seq: number, pressed: TextButton?)
 	if self.busy then
 		return
 	end
-	if #self:_changedSheets() > 0 then
-		self:_say("There are unapplied edits. Apply or discard them first.", true)
+
+	local changed = self:_changedSheets()
+	if #changed == 0 then
+		self:_readInto(seq, pressed)
 		return
 	end
 
-	-- Apply と同じ扱い。終わるまで表もツールバーも履歴も触らせない
+	-- 下書きを丸ごと置き換えるので、Apply していない編集は消える。Discard と同じ確認を挟む
+	self:_confirm(
+		`Replace unapplied edits in {table.concat(changed, ", ")} with the values of #{seq}?`,
+		"Restore",
+		function()
+			self:_readInto(seq, pressed)
+		end
+	)
+end
+
+function App._readInto(self: App, seq: number, pressed: TextButton?)
 	self:_setBusy(true, `Restoring #{seq}...`)
 	if pressed ~= nil then
 		(pressed :: TextButton).Text = "Restoring..."
 	end
 
+	-- 読んだあとに履歴を作り直さないので、押したボタンの文言は自分で戻す
+	local function done()
+		if pressed ~= nil then
+			(pressed :: TextButton).Text = "Restore"
+		end
+		self:_setBusy(false)
+	end
+
 	task.spawn(function()
 		local backend = self.backend :: Store.Backend
+		local schema = self.schema :: Schema.Normalized
+
 		local found, target = Session.readCommit(backend, seq)
 		if not found or target == nil then
-			self:_setBusy(false)
+			done()
 			self:_say(`Could not read commit #{seq}`, true)
 			return
 		end
 
-		local ok, result = Session.revert(backend, self.state :: Session.State, target, { at = DateTime.now():ToIsoDate(), by = author, note = nil })
-		if not ok then
-			self:_setBusy(false)
-			self:_say(`Restore failed: {tostring(result)}`, true)
+		local read, dataset = Session.readDataset(backend, schema, target)
+		if not read then
+			done()
+			self:_say(`Could not read the values of #{seq}: {tostring(dataset)}`, true)
 			return
 		end
 
-		-- 読み直しと live への配信まで済ませてから解除する
-		self:reload()
-		local schema = self.schema :: Schema.Normalized
-		Live.publish(schema, (self.state :: Session.State).dataset, (result :: Session.Commit).seq)
-		self:_setBusy(false)
-		self:_say(`Restored the values of #{seq} as #{(result :: Session.Commit).seq}`, false)
+		self.draft = dataset
+		self:_refreshGrid()
+
+		-- 今の値と同じなら戻すものが無い。控えを持つと、このあとの編集まで「#N への巻き戻し」に
+		-- されてしまう
+		local changed = self:_changedSheets()
+		if #changed > 0 then
+			-- Apply のときに「戻した時点から何を足したのか」を出すので、読み込んだ値も控えておく
+			self.restored = { seq = seq, dataset = Rows.cloneDataset(schema, dataset) }
+		end
+
+		done()
+		self:_say(
+			if #changed == 0
+				then `#{seq} is the same as the current values. Nothing to restore`
+				else `Restored #{seq} into the draft. Apply to save it, Discard to drop it`,
+			false
+		)
 	end)
 end
 

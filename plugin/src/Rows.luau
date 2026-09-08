@@ -132,4 +132,90 @@ function Rows.cloneDataset(schema: Schema.Normalized, dataset: { [string]: Sheet
 	return copy
 end
 
+--[[
+	何を変えたのかを一行にまとめる。commit が持つのは変えたシートの名前だけで、名前だけでは
+	「行を足したのか、元からある行を直したのか」が後から分からない。
+
+	`+` が足した行、`-` が消した行、`~` が直したもの。scalars には行が無いので `~` だけ出る。
+]]
+local function countRows(sheet: Schema.Sheet, before: { { [string]: any } }, after: { { [string]: any } }): (number, number, number)
+	local key = sheet.key
+	if key == nil then
+		-- key が無いシートは行を見分けられない。位置で突き合わせる
+		local edited = 0
+		for index = 1, math.min(#before, #after) do
+			if not rowsEqual(sheet, before[index], after[index]) then
+				edited += 1
+			end
+		end
+		return math.max(#after - #before, 0), math.max(#before - #after, 0), edited
+	end
+
+	local left: { [any]: { [string]: any } } = {}
+	for _, row in before do
+		left[row[key]] = row
+	end
+
+	local added, edited = 0, 0
+	for _, row in after do
+		local previous = left[row[key]]
+		if previous == nil then
+			added += 1
+		else
+			if not rowsEqual(sheet, previous, row) then
+				edited += 1
+			end
+			left[row[key]] = nil
+		end
+	end
+
+	local removed = 0
+	for _ in left do
+		removed += 1
+	end
+	return added, removed, edited
+end
+
+local function summarizeSheet(sheet: Schema.Sheet, before: SheetValue, after: SheetValue): string?
+	if sheet.kind == "scalars" then
+		local edited = 0
+		for _, column in sheet.columns do
+			if (before :: { [string]: any })[column.name] ~= (after :: { [string]: any })[column.name] then
+				edited += 1
+			end
+		end
+		return if edited == 0 then nil else `~{edited}`
+	end
+
+	local added, removed, edited = countRows(sheet, before :: { { [string]: any } }, after :: { { [string]: any } })
+	local parts: { string } = {}
+	if added > 0 then
+		table.insert(parts, `+{added}`)
+	end
+	if removed > 0 then
+		table.insert(parts, `-{removed}`)
+	end
+	if edited > 0 then
+		table.insert(parts, `~{edited}`)
+	end
+	return if #parts == 0 then nil else table.concat(parts, " ")
+end
+
+function Rows.summarize(schema: Schema.Normalized, before: { [string]: SheetValue }, after: { [string]: SheetValue }): string
+	local parts: { string } = {}
+	for _, sheet in schema.sheets do
+		local previous = before[sheet.name]
+		local current = after[sheet.name]
+		-- どちらかを持たないシートは比べようがない（その commit より後に足されたシート）
+		if previous == nil or current == nil then
+			continue
+		end
+		local piece = summarizeSheet(sheet, previous, current)
+		if piece ~= nil then
+			table.insert(parts, `{sheet.name} {piece}`)
+		end
+	end
+	return table.concat(parts, ", ")
+end
+
 return Rows
