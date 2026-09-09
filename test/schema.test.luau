@@ -31,11 +31,11 @@ print("duplicate sheet:", select(2, pcall(rosheet.defineSchema, {
 
 -- 書ける place の宣言。プラグインはこれに無い place で読み取り専用になる
 local sheets = { rosheet.sheet("a", { columns = { rosheet.column("c", "string") } }) }
-local restricted = rosheet.defineSchema(sheets, { writablePlaces = { 102760853725708 } })
+local restricted = rosheet.defineSchema(sheets, { writablePlaces = { 1234567890123 } })
 print("writablePlaces:", restricted.writablePlaces[1])
 print("no writablePlaces:", rosheet.defineSchema(sheets).writablePlaces)
 print("empty writablePlaces:", select(2, pcall(rosheet.defineSchema, sheets, { writablePlaces = {} })))
-print("bad writablePlaces:", select(2, pcall(rosheet.defineSchema, sheets, { writablePlaces = { "102760853725708" :: any } })))
+print("bad writablePlaces:", select(2, pcall(rosheet.defineSchema, sheets, { writablePlaces = { "1234567890123" :: any } })))
 
 -- 知らない鍵は捨てずに落とす。捨てると「宣言したのに効かない」が黙って通る
 print("unknown option:", select(2, pcall(rosheet.defineSchema, sheets, { writeablePlaces = { 1 } } :: any)))

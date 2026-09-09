@@ -158,7 +158,7 @@ end
 
 	`writablePlaces` を宣言すると、そこに無い place ではプラグインが読み取り専用になる。
 
-		rosheet.defineSchema({ ... }, { writablePlaces = { 102760853725708 } })
+		rosheet.defineSchema({ ... }, { writablePlaces = { 1234567890123 } })
 
 	同じ universe の place は DataStore を共有するので、本番 place を Studio で開くことが
 	そのまま master data への書き込み権限になる。宣言は git に載るので、増やすには PR が要る。
