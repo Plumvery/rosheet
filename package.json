@@ -1,6 +1,6 @@
 {
 	"name": "@plumvery/rosheet",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Roblox master data: define the schema in code, edit it in a Studio spreadsheet, bake it into the place",
 	"main": "src/index.js",
 	"bin": {
