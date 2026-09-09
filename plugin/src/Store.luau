@@ -116,6 +116,90 @@ function Store.dataStore(name: string, scope: string?): Backend
 end
 
 --[[
+	MemoryStore。共有下書きの速い経路。
+
+	DataStore と同じ Backend の形にしてあるので、呼び手は保存先の違いを知らずに済む。違うのは
+	性質の方で、こちらは**揮発する**（`MEMORY_TTL_SECONDS` 触られないと消える）。下書きの永続は
+	DataStore 側が持ち、こちらは「いま編集している人どうしを速く繋ぐ」ためだけに使う。
+
+	**1 項目 30KB までしか載らない。** 実測（placeId 102760853725708 の編集モード）で 30720 は
+	通り、32768 は `ItemValueSizeTooLarge` で落ちる。だから下書きは値ごとではなくセル単位の差分で
+	持つ（`Draft.luau` の冒頭）。それでもあふれる大きさになりうるので、呼び手は書く前に
+	`Draft.fitsInMemoryStore` で見る。
+
+	SortedMap を使うのは、キーで引ける唯一の型のため（Queue は読んだ人が消費してしまうので、
+	同じ下書きを全員が読む用途には使えない）。
+]]
+-- 触られなくなった下書きが残り続けないだけの長さ。書くたびに延びるので、編集中に消えることはない
+local MEMORY_TTL_SECONDS = 60 * 60
+
+function Store.memoryStore(name: string): Backend
+	local service = game:GetService("MemoryStoreService")
+	local map = service:GetSortedMap(name)
+
+	return {
+		kind = "memorystore",
+		label = `MemoryStore "{name}"`,
+
+		get = function(key: string): Result
+			local success, raw = pcall(function()
+				return map:GetAsync(key)
+			end)
+			if not success then
+				return err(tostring(raw))
+			end
+			if raw == nil then
+				return ok(nil)
+			end
+			if type(raw) ~= "string" then
+				return err(`{key}: not a value rosheet wrote (not a JSON string)`)
+			end
+			local decoded, value = decode(key, raw)
+			return if decoded then ok(value) else err(value)
+		end,
+
+		set = function(key: string, value: any): Result
+			local success, failure = pcall(function()
+				map:SetAsync(key, encode(value), MEMORY_TTL_SECONDS)
+			end)
+			return if success then ok(value) else err(tostring(failure))
+		end,
+
+		update = function(key: string, transform: (any) -> any): Result
+			local aborted = false
+			local success, raw = pcall(function()
+				return map:UpdateAsync(key, function(current: any)
+					local value: any = nil
+					if current ~= nil and type(current) == "string" then
+						local decoded, result = decode(key, current)
+						if decoded then
+							value = result
+						end
+					end
+					local next = transform(value)
+					if next == nil then
+						aborted = true
+						return nil
+					end
+					return encode(next)
+				end, MEMORY_TTL_SECONDS)
+			end)
+			if not success then
+				return err(tostring(raw))
+			end
+			if aborted then
+				return err("Conflict: someone else wrote first")
+			end
+			if type(raw) ~= "string" then
+				return err(`{key}: not a value rosheet wrote (not a JSON string)`)
+			end
+			local decoded, value = decode(key, raw :: string)
+			return if decoded then ok(value) else err(value)
+		end,
+	}
+end
+
+--[[
 	plugin の設定。このマシンのこのユーザーだけに残る。place の公開も API Services も要らないので、
 	まだ公開していない place や個人作業の退路として使う。
 ]]
