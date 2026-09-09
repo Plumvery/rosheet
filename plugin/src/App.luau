@@ -219,6 +219,9 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		-- この place から書けないときの理由（スキーマの writablePlaces）。編集も履歴も読めるが
 		-- Apply だけ押せなくなる
 		readOnly = nil :: string?,
+		-- banner に今出している表示の通し番号。8 秒後の自動消灯が、そのあいだに差し替わった
+		-- 表示を消さないようにするため
+		bannerSeq = 0,
 		-- 最後に読み切れた宣言。place が変わったとき「中身も変わったのか」を見るのに使う
 		loaded = nil :: Loaded?,
 		-- 保存先へ実際に置けたスキーマ。同じものを毎回書き直さないため
@@ -407,17 +410,55 @@ function App._buildChrome(self: App)
 	bannerPadding.Parent = self.banner
 end
 
+--[[
+	一時的なエラー（Apply に失敗した、など）は banner に出して 8 秒で消す。一度きりの出来事
+	なので、出したままにすると表を覆い続ける。
+
+	読み取り専用の理由だけは消さない。状態のほうは続くので、説明だけ先に消えると、あとから
+	見た人にはステータス行の `· read-only` しか残らない —— なぜ書けないのか、何をすれば
+	直るのか（版ズレなら「Studio を再起動しろ」）が画面から消える。
+]]
 function App._say(self: App, message: string, isError: boolean)
-	if isError then
-		self.banner.Text = ` {message}`
-		self.banner.Visible = true
-		task.delay(8, function()
-			if self.banner ~= nil then
-				self.banner.Visible = false
-			end
-		end)
-	else
+	if not isError then
 		self.status.Text = message
+		return
+	end
+
+	self.banner.Text = ` {message}`
+	self.banner.Visible = true
+
+	-- 予約済みの自動消灯を無効にする。無効にしないと、前のエラーの残り時間でこの表示が消える
+	self.bannerSeq += 1
+
+	if self.readOnly ~= nil and message == self.readOnly then
+		return
+	end
+
+	local seq = self.bannerSeq
+	task.delay(8, function()
+		-- そのあいだに別の表示へ差し替わっていたら、この予約はもう自分のものではない
+		if self.bannerSeq ~= seq then
+			return
+		end
+		self:_refreshBanner()
+	end)
+end
+
+--[[
+	banner を今の状態に合わせる。読み取り専用なら理由を出したままにし、そうでなければ閉じる。
+	一時的なエラーが読み取り専用の上に重なったときも、消えたあとここへ戻る。
+]]
+function App._refreshBanner(self: App)
+	if self.banner == nil then
+		return
+	end
+	-- 予約済みの自動消灯を無効にする。読み取り専用へ戻した表示を、あとから消されないように
+	self.bannerSeq += 1
+	if self.readOnly ~= nil then
+		self.banner.Text = ` {self.readOnly :: string}`
+		self.banner.Visible = true
+	else
+		self.banner.Visible = false
 	end
 end
 
@@ -508,6 +549,9 @@ function App.reload(self: App)
 	local schema = loaded.schema
 	self.schema = schema
 	self.readOnly = loaded.readOnly
+	-- 理由はここで出す。この先の途中で失敗しても（publish できない、読めない）、その一時的な
+	-- エラーが消えたあとに理由へ戻る。読み取り専用でなくなったなら、ここで閉じる
+	self:_refreshBanner()
 	self:_refreshPlace()
 
 	-- スキーマが宣言する DataStore が変わったら、それまでの backend は捨てる
@@ -571,10 +615,6 @@ function App.reload(self: App)
 	self:_refreshGrid()
 	self:_refreshHistory()
 	self:_refreshToolbar()
-
-	if self.readOnly ~= nil then
-		self:_say(self.readOnly :: string, true)
-	end
 end
 
 function App._buildTabs(self: App)
