@@ -20,6 +20,15 @@ local HISTORY_BUTTON_WIDTH = 72
 -- "Restoring..." が入る幅。押している間だけ文言が伸びるので、狭いと切れる
 local RESTORE_BUTTON_WIDTH = 88
 
+--[[
+	他の誰かが Apply したかを見に行く間隔。
+
+	読むのは `head` の 1 キーだけで、commit も blob も引かない。それでも DataStore の読み取り枠を
+	食うので、短くしない。数十秒あれば「Apply したのに相手がずっと古い表を見ている」という
+	いちばん困る状態は消える —— 秒単位の追随が要るなら、それはポーリングではなく別の経路の話。
+]]
+local HEAD_POLL_SECONDS = 30
+
 local App = {}
 App.__index = App
 
@@ -225,6 +234,10 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		publishedSchema = nil :: Schema.Normalized?,
 		-- head が pin より何 commit 先か。出荷値は tag から焼くので、Apply しても出荷は動かない
 		tags = { entries = {} },
+		-- 最後に見に行った保存先の head。自分の state より先なら、誰かが Apply している
+		remoteHead = nil :: number?,
+		-- 閉じたら head を見に行くのをやめる合図
+		stopped = false,
 		activeSheet = 1,
 		showHistory = false,
 		log = { entries = {} },
@@ -245,6 +258,7 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 	-- 名前を引くのは待つので、画面を出してから別スレッドで
 	task.spawn(resolveAuthor)
 	self:reload()
+	self:_watchHead()
 	return self
 end
 
@@ -303,7 +317,7 @@ function App._buildChrome(self: App)
 	self.reloadButton = button(left, "Reload", 72)
 	self.reloadButton.LayoutOrder = 5
 	self.reloadButton.Activated:Connect(function()
-		self:reload()
+		self:_reloadPressed()
 	end)
 
 	self.status = Instance.new("TextLabel")
@@ -494,6 +508,84 @@ function App._placeChanged(self: App, reasons: Place.Changes)
 		return
 	end
 	self:reload()
+end
+
+--[[
+	Reload ボタン。
+
+	`reload` は保存先から読み直して下書きを作り直すので、押すと Discard と同じことが起きる。
+	確認も無しにそれが起きるのはまずい —— しかも「誰かが Apply した」と気づいた直後がこの
+	ボタンへ手が伸びる場面なので、いちばん踏みやすい。下書きがあるうちは読み直さない。
+
+	`_placeChanged` が同じ理由で自動の読み直しを止めているのと揃える。捨ててよいかを決められる
+	のは編集している側だけで、Apply していない編集は履歴にも無いので戻せない。
+]]
+function App._reloadPressed(self: App)
+	if self.busy then
+		return
+	end
+	if self.schema ~= nil and self.state ~= nil and #self:_changedSheets() > 0 then
+		self:_say("Reload would drop the draft. Apply or Discard first", true)
+		return
+	end
+	self:reload()
+end
+
+--[[
+	保存先の head を定期的に見に行く。ウィジェットを閉じると App ごと捨てられるので、
+	開いている間だけ走る。
+
+	**見つけても自動で読み直さない。** 読み直しは下書きを捨てるうえ、表が足元で入れ替わる。
+	出すのは「先の commit がある」という事実だけで、いつ追いつくかは編集している側が決める。
+]]
+function App._watchHead(self: App)
+	task.spawn(function()
+		while not self.stopped do
+			task.wait(HEAD_POLL_SECONDS)
+			if self.stopped then
+				break
+			end
+			self:_checkHead()
+		end
+	end)
+end
+
+function App._checkHead(self: App)
+	-- Apply / Restore の最中は見ない。head はこちらの操作で動いている最中で、終われば reload が走る
+	if self.busy or self.backend == nil or self.state == nil then
+		return
+	end
+
+	local ok, head = Session.readHead(self.backend :: Store.Backend)
+	-- 読めなかった回は黙って捨てる。ネットワークが一度こけただけで赤いバナーを出すと、
+	-- 30 秒ごとに出続けて、本物のエラーが埋まる
+	if not ok or type(head) ~= "number" then
+		return
+	end
+
+	if head == self.remoteHead then
+		return
+	end
+	self.remoteHead = head
+	self:_refreshToolbar()
+end
+
+--[[
+	自分より先の commit があるなら、ステータス行に出す文言。
+
+	下書きがあるかで言うことが変わる。下書きがあるまま Apply しても、`Session.apply` は自分が
+	読んだ head を期待して番号を取りに行くので、必ず競合で落ちる。押してから知らせるのでは
+	遅いので、押す前に落ちると書いておく。
+]]
+function App._behindNotice(self: App, dirty: boolean): string
+	local state = self.state
+	local remote = self.remoteHead
+	if state == nil or remote == nil or remote <= (state :: Session.State).head then
+		return ""
+	end
+	return if dirty
+		then ` \u{00B7} #{remote} is in, Apply will conflict`
+		else ` \u{00B7} #{remote} is in, press Reload`
 end
 
 function App.reload(self: App)
@@ -731,9 +823,14 @@ function App._refreshToolbar(self: App)
 	local backend = self.backend :: Store.Backend
 	local where = if Live.isPlaying() then " \u{00B7} playing" else ""
 	local locked = if writable then "" else " \u{00B7} read-only"
+	-- 自分の番号のすぐ隣に出す。末尾に足すと、保存先の名前と pin の距離の向こう側になって読まれない
+	local behind = self:_behindNotice(dirty)
 	self.status.Text = if self.busyLabel ~= nil
 		then self.busyLabel :: string
-		else `#{state.head} \u{00B7} {backend.label}{self:_pinDistance()}{locked}{where}`
+		else `#{state.head}{behind} \u{00B7} {backend.label}{self:_pinDistance()}{locked}{where}`
+	-- ステータス行には常に何か書いてあるので、文言が 1 つ増えただけでは気づかれない。色も変える
+	local colors = Theme.palette()
+	self.status.TextColor3 = if behind ~= "" and self.busyLabel == nil then colors.accent else colors.dimText
 end
 
 --[[
@@ -982,6 +1079,9 @@ function App.apply(self: App)
 
 		if not ok then
 			self:_setBusy(false)
+			-- 競合で落ちたなら、次のポーリングを待たずに相手の番号を出す。理由が分からないまま
+			-- "Apply failed" だけが残ると、何をすれば通るのかが読めない
+			self:_checkHead()
 			self:_say(`Apply failed: {tostring(result)}`, true)
 			return
 		end
@@ -1147,6 +1247,9 @@ function App._readInto(self: App, seq: number, pressed: TextButton?)
 end
 
 function App.destroy(self: App)
+	-- 先に止める。ウィジェットを閉じたあとに head を見に行っても、映す先がもう無い
+	self.stopped = true
+
 	local watcher = self.watcher
 	if watcher ~= nil then
 		(watcher :: Place.Watcher):destroy()
