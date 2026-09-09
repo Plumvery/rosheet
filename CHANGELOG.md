@@ -5,7 +5,7 @@
 書式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)、バージョンは
 [Semantic Versioning](https://semver.org/lang/ja/) に従う。1.0 より前は、破壊的変更でマイナーを上げる。
 
-## [Unreleased]
+## [0.2.0] - 2026-09-09
 
 ### Added
 
@@ -54,4 +54,4 @@
 
 ### Note
 
-- pre-alpha。**Studio の実機での往復（実 DataStore との疎通、Apply からプレイテストへの反映、rocas のアセット読み取り）はまだ確認していない。** 確かめた範囲は [README の進捗](README.md#進捗) を参照。
+- pre-alpha。**Studio の実機での往復（実 DataStore との疎通、Apply からプレイテストへの反映、rocas のアセット読み取り）はまだ確認していない。**
