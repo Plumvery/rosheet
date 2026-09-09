@@ -4,7 +4,7 @@
 
 スキーマは Luau / roblox-ts で書く。値は Studio のプラグインでスプレッドシートのように編集し、Apply を押すとその場のプレイテストに反映され、同時に履歴として残る。戻りたくなったら Apply 単位で巻き戻せる。確定したら `rosheet pull` で型付きのモジュールを書き出し、git に載せて place に焼く。
 
-> **pre-alpha。** CLI・コード生成・DataStore の履歴・CSV の出入り・Studio プラグインまで実装済み。**ただし Studio の実機での往復はまだ確認していない**（[進捗](#進捗)）。
+> **pre-alpha。** CLI・コード生成・DataStore の履歴・CSV の出入り・Studio プラグインまで実装済み。**ただし Studio の実機での往復はまだ確認していない。**
 
 ## なぜ
 
@@ -30,6 +30,22 @@ Studio プラグイン ──▶ DataStore（編集の正・Apply ごとの履�
 - **CSV の出入り**。スプレッドシートや外部ツールと往復する退路。CSV は経路の外にあり、正ではない
 - **rocas のアセットを引ける**。`asset` 列に `rocas://assets/...` を書くと、Studio では rocas の manifest から補完とサムネイルが出て、`pull` のときに `rbxassetid://` へ解決される
 - **プラグインは入れ直さない**。設定もスキーマもアセット一覧も焼き込まず、place の中から読む
+
+## インストール
+
+npm にはまだ出していない。GitHub から直接入れる（Node 18 以上）:
+
+```bash
+npm install --save-dev github:Plumvery/rosheet
+```
+
+バージョンを固定するならタグを付ける:
+
+```bash
+npm install --save-dev github:Plumvery/rosheet#v0.1.0
+```
+
+入ったら `npx rosheet` でコマンドの一覧が出る。値を触るだけの人向けに、npm を通さない[プラグイン単体のインストーラー](#npm-を使わずにプラグインだけ入れる)もある。
 
 ## 使い方
 
@@ -61,13 +77,15 @@ return rosheet.defineSchema({
 })
 ```
 
-`rosheet` の実体は npm パッケージの `runtime/` に入っている。`require` が届く場所へ複製する:
+`rosheet` の実体はパッケージの `runtime/` に入っている。`require` が届く場所へ複製する:
 
 ```bash
 npx rosheet runtime
 ```
 
-既定では `output.dir` の隣に `rosheet/` を書く（`--out <dir>` で変えられる）。それを Rojo で place へ配線すれば（上の例では `ReplicatedStorage.Packages.rosheet`）、この 1 本の require から `defineSchema` も `bind` も取れる。片方だけなら `Packages.rosheet.schema` / `Packages.rosheet.live` と分けて require してもよい。**複製なので、rosheet を上げたら打ち直す。打ち直したら Studio を開き直す。** Studio の `require` は戻り値をインスタンス単位で恒久的にキャッシュするので、Rojo が同期しても古いランタイムが評価され続け、その 1 セッションのあいだ新しい宣言（`writablePlaces` など）が黙って落ちる。プラグインはこのズレを見つけると読み取り専用になり、開き直すよう出す。
+既定では `output.dir` の隣に `rosheet/` を書く（`--out <dir>` で変えられる）。それを Rojo で place へ配線すれば（上の例では `ReplicatedStorage.Packages.rosheet`）、この 1 本の require から `defineSchema` も `bind` も取れる。片方だけなら `Packages.rosheet.schema` / `Packages.rosheet.live` と分けて require してもよい。
+
+**複製なので、rosheet を上げたら打ち直す。打ち直したら Studio を開き直す。** Studio の `require` は戻り値をインスタンス単位で恒久的にキャッシュするので、Rojo が同期しても古いランタイムが評価され続ける。プラグインはこのズレを見つけると読み取り専用になり、開き直すよう出す。
 
 **roblox-ts の場合。** `output.format = "roblox-ts"` なら `.d.ts` も一緒に置かれるので、`src/` の下へ出せばそのまま import できる:
 
@@ -76,9 +94,9 @@ import { bind } from "shared/rosheet/live";
 import { column, defineSchema, sheet } from "shared/rosheet/schema";
 ```
 
-`node_modules/@plumvery/rosheet/runtime` を直接 import することはできない。npm スコープが typeRoots に無いと言われ、言われたとおり typeRoots に足すと、そのスコープの全パッケージが暗黙の型ライブラリになって `types` を持たないパッケージで落ちる。複製するのはそのため。
+`node_modules` の中の `runtime/` を直接 import することはできない（npm スコープを typeRoots に足すと、そのスコープの全パッケージが暗黙の型ライブラリになって落ちる）。複製するのはそのため。
 
-ただし**スキーマの宣言そのものは rootDir の外に置く。** rbxtsc は `src/server` を ServerScriptService、`src/shared` を ReplicatedStorage へ出すが、プラグインが走査するのは ServerStorage と ReplicatedStorage で、ReplicatedStorage は本番のクライアントにまで配信される。スキーマの宣言は Luau で `src/` の外に書き、Rojo で ServerStorage へ配線する。
+ただし**スキーマの宣言そのものは rootDir の外に置く。** rbxtsc は `src/shared` を ReplicatedStorage へ出すが、そこは本番のクライアントにまで配信される。スキーマの宣言は Luau で `src/` の外に書き、Rojo で ServerStorage へ配線する。
 
 ### 2. プラグインを入れる（一度だけ）
 
@@ -90,7 +108,7 @@ Studio の Plugins フォルダに `rosheet.rbxmx` が置かれる。Studio 側�
 
 **プラグインには何も焼き込まない。** スキーマも、保存先の DataStore 名も、rocas のアセット一覧も、プラグインが place の中から読む —— `ServerStorage` と `ReplicatedStorage` を走査して、Rojo が同期したモジュールを見つけ、`DescendantAdded` / Source の変化で追い直す。スキーマを直しても、アセットを足しても、プラグインは入れ直さなくてよい。
 
-#### npm を使わずに入れる
+#### npm を使わずにプラグインだけ入れる
 
 値を触るだけのプランナーやアーティストに Node と npm を求めるのは重い。[リリース](https://github.com/Plumvery/rosheet/releases/latest)にダブルクリックで入るインストーラーを添付してある:
 
@@ -102,9 +120,7 @@ Studio の Plugins フォルダに `rosheet.rbxmx` が置かれる。Studio 側�
 
 どちらのインストーラーも `.rbxmx` を base64 で中に抱えていて、`rosheet plugin` と同じ場所・同じファイル名で置く（Windows は `%LOCALAPPDATA%\Roblox\Plugins`、macOS は `~/Documents/Roblox/Plugins`）。**インストール時に通信しない**ので、プロキシの向こうでも URL が腐っても動く。置いたら Studio を再起動する。
 
-プラグインには何も焼き込んでいないので、リリースから取った 1 本はプラグイン自体が変わるまで正しいままになる。
-
-CLI 側の設定はこれとは別に要る:
+### 3. CLI を設定する
 
 ```bash
 npx rosheet init
@@ -116,20 +132,20 @@ npx rosheet init
 return rosheet.defineSchema({ ... }, { datastore = "my-master-data", scope = "master" })
 ```
 
-**本番の place から書けないようにする。** 同じ universe の place は DataStore を共有するので、本番 place を Studio で開くこと自体が master data への書き込み権限になる。書いてよい place を宣言すると、そこに無い place ではプラグインが読み取り専用になる（表も履歴も読めるが、セルに書けず、行も足せず、Apply も押せない。スキーマの publish もしない）:
+**本番の place から書けないようにする。** 同じ universe の place は DataStore を共有するので、本番 place を Studio で開くこと自体が master data への書き込み権限になる。書いてよい place を宣言すると、そこに無い place ではプラグインが読み取り専用になる（表も履歴も読めるが、セルに書けず、行も足せず、Apply も押せない）:
 
 ```lua
 return rosheet.defineSchema({ ... }, {
 	-- ここに無い place では読み取り専用
-	writablePlaces = { 102760853725708 },
+	writablePlaces = { 1234567890123 },
 })
 ```
 
-宣言しなければ今までどおりどの place からでも書ける。**これは事故を止めるためのもので、権限の境界ではない** —— DataStore の書き込み権限は universe 単位なので、この宣言を書き換えた place を開けば書ける。宣言は git に載るので、増やすには PR が要る。
+宣言しなければどの place からでも書ける。**これは事故を止めるためのもので、権限の境界ではない** —— DataStore の書き込み権限は universe 単位なので、この宣言を書き換えた place を開けば書ける。宣言は git に載るので、増やすには PR が要る。
 
-**スキーマが読めなくなったときも読み取り専用になる。** モジュールを消した・名前を変えた・Rojo の同期から外れた・`require` が落ちる、のどれでも、`writablePlaces` を含む宣言そのものが読めていないので、最後に読めた「この place は書ける」は当てにならない。読み込み済みの表と履歴はそのまま出したまま書き込みだけ止め、理由をウィンドウの下に出し続ける。
+スキーマそのものが読めなくなったとき（モジュールを消した・名前を変えた・Rojo の同期から外れた・`require` が落ちた）も読み取り専用になる。`writablePlaces` を含む宣言が読めていない以上、最後に読めた「この place は書ける」は当てにならないため。
 
-### 3. 編集して Apply
+### 4. 編集して Apply
 
 Studio で place を開き、ツールバーの rosheet を押すとウィンドウが出る。
 
@@ -143,7 +159,7 @@ Studio で place を開き、ツールバーの rosheet を押すとウィンド
 
 place をまだ公開していない、あるいは API Services を入れていない場合は、自動でこのマシンだけのローカル保存に切り替わる（その旨が画面に出る）。チームで共有するには DataStore が要る。
 
-### 4. プレイテスト中の値を使う
+### 5. プレイテスト中の値を使う
 
 ゲーム側が生成物をそのまま読むと、焼かれた値しか見えない。Apply を反映させたいところだけ `bind` を通す:
 
@@ -156,7 +172,7 @@ print(Guns.get("AK47").damage)
 
 `bind` は本番では同梱値をそのまま返す（`RosheetLive` が存在しないため）。型も同梱値のまま変わらない。
 
-### 5. 生成物を取り込んでコミットする
+### 6. 生成物を取り込んでコミットする
 
 ```bash
 npx rosheet pull
@@ -171,9 +187,9 @@ print(Guns.get("AK47").damage)
 for _, gun in Guns.rows do ... end
 ```
 
-### 6. 出荷する値を固定する
+### 7. 出荷する値を固定する
 
-ここまでの `pull` は **常に head を焼く**。調整が終わったあとに誰かが Studio で Apply すると、次に pull した人がそれごと焼いてしまう。気づく手段は `rosheet log` を見に行くことだけになる。
+ここまでの `pull` は **常に head を焼く**。調整が終わったあとに誰かが Studio で Apply すると、次に pull した人がそれごと焼いてしまう。
 
 出口を固定する。調整し終わった commit に名前を付けて、
 
@@ -190,7 +206,7 @@ npx rosheet update                # 今の head に追いつく
 npx rosheet status                # head が pin より何 commit 先か
 ```
 
-**編集を止める必要は無い。** 調整担当は今までどおり Apply できて、それが勝手に出荷されないだけ。プラグインのステータス行には `#45 · 3 ahead of v0.3.0` のように出るので、編集する側も「自分の変更はまだ出荷されていない」と分かる。
+**編集を止める必要は無い。** 調整担当は今までどおり Apply できて、それが勝手に出荷されないだけ。プラグインのステータス行には `#45 · 3 ahead of v0.3.0` のように出る。
 
 lock がハッシュではなく値ごと持つのは、rosheet を上げて生成物の書式が変わっても `check` が正しく回るようにするため。副産物として、**lock があるコマンドは Open Cloud のキーが要らなくなる**:
 
@@ -200,7 +216,7 @@ npx rosheet export --local     # lock の値を CSV へ
 npx rosheet import --local     # CSV を lock へ戻して焼き直す（commit は積まない）
 ```
 
-DataStore を読むのは `update` / `status` / `log` / `revert` / `import`（`--local` 無し）だけになる。値を 1 個だけ直したい人は `rosheet.lock.json` を直接編集して `rosheet pull` でもよい —— キーを持たない貢献者も、CI も、ブランチ限定の値も、これで閉じる。ブランチごとに違う値を試したければ、そのブランチの lock を差し替えるだけで、本番相当のデータには触らない。
+DataStore を読むのは `update` / `status` / `log` / `revert` / `import`（`--local` 無し）だけになる。値を 1 個だけ直したい人は `rosheet.lock.json` を直接編集して `rosheet pull` でもよい。
 
 **最初の 1 回だけは Studio の往復が要る。** CLI は Luau を評価しないので、スキーマの出所はプラグインが publish したものになる。`rosheet update` を一度打てば、それ以降はスキーマも lock の中にある。
 
@@ -240,59 +256,22 @@ Open Cloud の API キー（`ROSHEET_API_KEY`）が要るのは DataStore を触
 | `log` | 履歴の一覧（最新 200 件） |
 | `tags` | commit に付けた名前の一覧（最新 200 件）。CLI が書き、プラグインは読むだけ |
 
-設計上の約束は [src/store.js](src/store.js) の冒頭コメントが正。要点は 3 つ:
-
-- **キーに `/` を入れない。** Open Cloud v2 はキーを URL のパスに埋める
-- **値は必ず JSON 文字列で置く。** Luau のテーブルをそのまま置くと、Open Cloud がそれをどんな JSON に落とすかに全部が乗る（空のテーブルが配列と辞書のどちらになるか、が典型）。文字列にしておけば、符号化するのは常に `HttpService:JSONEncode` の側だけになる
-- **DataStore 組み込みの versioning は使わない。** あれはキーごとに UTC 1 時間で 1 版しか作らず、同じ時間内の後続の書き込みは前を恒久的に上書きするので、Apply の履歴には使えない
+設計上の約束は [src/store.js](src/store.js) の冒頭コメントが正。
 
 ## 制約
 
 - プラグインが DataStore を読み書きするには、place が universe に紐づいて公開されていて、**Studio Access to API Services** が入っている必要がある。同じ universe の place は DataStore を共有するので、テスト用の place で作業する（`writablePlaces` を宣言すれば、本番 place を開いても読み取り専用になる）
-- 1 シートの値は 4MB まで（DataStore のキーあたりの上限）。`rosheet.lock.json` は同じ値を持つので、自然に同じ範囲に収まる
-- 古い blob は消えない。`rosheet gc` は未実装。入れるときは **tag と `rosheet.lock.json` が参照する blob を回収してはいけない**
+- 1 シートの値は 4MB まで（DataStore のキーあたりの上限）
+- 古い blob は消えない。`rosheet gc` は未実装
+- まだ無いもの: 列幅の変更、並べ替えと絞り込み、複数セルの範囲選択
 
-## 進捗
+## 例
 
-| | 状態 | 確かめた範囲 |
-|---|---|---|
-| スキーマの定義（Luau / roblox-ts） | 動く | Lune で実行して検証 |
-| コード生成（`*.luau` / `*.luau` + `*.d.ts`） | 動く | 生成物を Lune で実行して検証 |
-| 履歴の計画（commit / revert / log） | 動く | 単体テスト |
-| CSV の出入り | 動く | 往復の単体テスト |
-| pin（`rosheet.lock.json`）とオフライン生成 | 動く | 単体テストと、一時プロジェクトでの `pull` / `check` / `import --local` / `export --local`（キー無し） |
-| CLI | 実装済み | **実 DataStore との疎通は未確認**（`update` / `status` / `tag` / `log` / `revert` / `import`） |
-| Studio プラグイン | 実装済み | コンパイルと `.rbxmx` の組み立てまで。**Studio 実機は未確認** |
-| ランタイムの live 反映（`bind`） | 実装済み | コンパイルのみ。**Studio 実機は未確認** |
+[example/](example/) にスキーマの書き方と、それを Studio で開くまでの手順がある。
 
-まだ無いもの: 列幅の変更、並べ替えと絞り込み、複数セルの範囲選択、古い blob の掃除（`rosheet gc`）。
+## 開発
 
-## 次にやること
-
-**Studio の実機で往復を確かめる。** CLI もプラグインもコードとしては通っているが、実 DataStore との疎通、Apply からプレイテストへの反映、rocas の manifest の読み取りは、まだ Studio で確認していない。
-
-## リリース
-
-バージョンは GitHub のリリースタグで管理する。npm へはまだ出していない。
-
-1. [CHANGELOG.md](CHANGELOG.md) の `[Unreleased]` の見出しを、新しいバージョンと日付に書き換える
-2. `package.json` の `version` を上げる（1.0 より前は、破壊的変更でマイナーを上げる）
-3. `main` へマージしてから、その commit にタグを打って push する
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-[`release.yml`](.github/workflows/release.yml) がこれを拾い、[`ci.yml`](.github/workflows/ci.yml) のテスト（node と Luau）を通してから GitHub Release を作る。本文は CHANGELOG のそのバージョンの節がそのまま入る。
-
-タグと `package.json` がずれていたり、CHANGELOG にその節が無かったりすると、Release は作られずに落ちる。直したら、タグを打ち直す:
-
-```bash
-git tag -d v0.2.0 && git push origin :v0.2.0
-```
-
-GitHub の UI から Release を publish しても（タグはそこで作られる）同じ検査は走る。その場合、Release は既にあるので本文は触らない。
+[CONTRIBUTING.md](CONTRIBUTING.md) を参照。
 
 ## ライセンス
 

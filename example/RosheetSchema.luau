@@ -7,7 +7,7 @@
 --
 -- 書いてよい place を絞るなら writablePlaces を足す。同じ universe の place は DataStore を
 -- 共有するので、本番 place を Studio で開くこと自体が書き込み権限になる:
---   rosheet.defineSchema({ ... }, { writablePlaces = { 102760853725708 } })
+--   rosheet.defineSchema({ ... }, { writablePlaces = { 1234567890123 } })
 --
 -- ReplicatedStorage には置かない。本番のクライアントにまで配信されるため。
 
