@@ -5,7 +5,7 @@ const { normalizeSchema } = require("../src/schema");
 const { normalizeDataset, serializeSheet, coerceString } = require("../src/rows");
 const { generateLuau, generateDts } = require("../src/codegen");
 const { sheetToCsv, csvToSheet, parse } = require("../src/csv");
-const { parseToml, normalizeConfig } = require("../src/config");
+const { parseToml, normalizeConfig, loadEnv } = require("../src/config");
 const store = require("../src/store");
 const { render } = require("../src/rbxmx");
 const { entryUrl } = require("../src/opencloud");
@@ -131,6 +131,64 @@ test("TOML は必要な部分だけ読む", () => {
 	assert.strictEqual(config.output.format, "luau");
 	assert.strictEqual(config.output.dir, "out");
 	assert.throws(() => normalizeConfig(parseToml('[output]\nformat = "nope"\ndir = "o"', "t"), "t"), /output.format/);
+});
+
+test(".env の値は素のまま読む（TOML のスカラではない）", () => {
+	const { mkdtempSync, writeFileSync } = require("node:fs");
+	const { tmpdir } = require("node:os");
+	const nodePath = require("node:path");
+
+	// Open Cloud のキーは記号を含み、引用符では囲まれていない。README もそう案内している
+	const key = "1+RaG/xyz=abc";
+	const cwd = mkdtempSync(nodePath.join(tmpdir(), "rosheet-"));
+	writeFileSync(
+		nodePath.join(cwd, ".env"),
+		[
+			"# comment",
+			`ROSHEET_TEST_PLAIN=${key}`,
+			`ROSHEET_TEST_QUOTED="${key}"`,
+			"ROSHEET_TEST_EMPTY=",
+			"ROSHEET_TEST_TAKEN=from-file",
+			"not a pair",
+		].join("\n"),
+	);
+
+	const names = ["PLAIN", "QUOTED", "EMPTY", "TAKEN"].map((name) => `ROSHEET_TEST_${name}`);
+	for (const name of names) delete process.env[name];
+	process.env.ROSHEET_TEST_TAKEN = "from-environment";
+
+	try {
+		loadEnv(cwd);
+		assert.strictEqual(process.env.ROSHEET_TEST_PLAIN, key);
+		assert.strictEqual(process.env.ROSHEET_TEST_QUOTED, key);
+		assert.strictEqual(process.env.ROSHEET_TEST_EMPTY, "");
+		// 環境変数のほうが先。CI はこちらで渡す
+		assert.strictEqual(process.env.ROSHEET_TEST_TAKEN, "from-environment");
+	} finally {
+		for (const name of names) delete process.env[name];
+	}
+});
+
+test(".env が読めなくても、値をエラー本文に出さない", () => {
+	const { mkdtempSync, writeFileSync } = require("node:fs");
+	const { tmpdir } = require("node:os");
+	const nodePath = require("node:path");
+
+	// .env に入っているのはシークレット。本文に載ると端末の履歴と CI のログに平文で残る
+	const secret = "SUPER+SECRET/KEY=";
+	const cwd = mkdtempSync(nodePath.join(tmpdir(), "rosheet-"));
+	writeFileSync(nodePath.join(cwd, ".env"), [`ROSHEET_TEST_SECRET=${secret}`, "= broken", `!bad=${secret}`].join("\n"));
+
+	delete process.env.ROSHEET_TEST_SECRET;
+	try {
+		loadEnv(cwd);
+		assert.strictEqual(process.env.ROSHEET_TEST_SECRET, secret);
+	} catch (error) {
+		assert.ok(!String(error.message).includes(secret), ".env の値がエラー本文に出ている");
+		throw error;
+	} finally {
+		delete process.env.ROSHEET_TEST_SECRET;
+	}
 });
 
 test("commit は変わったシートだけ新しい blob を作る", () => {

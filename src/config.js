@@ -97,7 +97,28 @@ function loadConfig(cwd = process.cwd()) {
 	return normalizeConfig(parseToml(readFileSync(file, "utf8"), CONFIG_FILE), CONFIG_FILE);
 }
 
-/** .env は「あれば読む」。CI では環境変数で渡されるので、無くても失敗にしない */
+/** 囲みの引用符だけ外す。中身はいっさい解釈しない —— API キーには記号がそのまま入る */
+function unquote(raw) {
+	const text = raw.trim();
+	const quote = text[0];
+	if (text.length >= 2 && (quote === '"' || quote === "'") && text.endsWith(quote)) return text.slice(1, -1);
+	return text;
+}
+
+/** .env は「あれば読む」。CI では環境変数で渡されるので、無くても失敗にしない。
+ *
+ * 値は TOML のスカラとして読まない。`.env` は TOML ではないので値は素で書かれるし、
+ * README も `ROSHEET_API_KEY=` の右にキーをそのまま貼る前提で書いてある。スカラとして
+ * 読むと引用符の無い値が全部落ちるので、**案内どおりに貼った人が全員落ちる**。
+ *
+ * `#` から先も落とさない。同じ `.env` は rocas も読んでいて、あちらは落とさない ——
+ * ここだけ落とすと、1 枚のファイルを 2 つのツールが違う意味で読むことになる。
+ *
+ * 読めない行は黙って飛ばす。**値をエラー本文に載せない** —— `.env` に入っているのは
+ * シークレットなので、載せると端末の履歴・スクロールバック・CI のログに平文で残り、
+ * キーを作り直す羽目になる。`rosheet.toml` は設定であってシークレットではないので、
+ * あちらは今までどおり値を出す（どの行が悪いか分からないと直せない）。
+ */
 function loadEnv(cwd = process.cwd()) {
 	const file = path.join(cwd, ".env");
 	if (!existsSync(file)) return;
@@ -106,7 +127,7 @@ function loadEnv(cwd = process.cwd()) {
 		if (line === "" || line.startsWith("#")) continue;
 		const pair = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
 		if (pair === null) continue;
-		if (process.env[pair[1]] === undefined) process.env[pair[1]] = parseScalar(pair[2] === "" ? '""' : pair[2], ".env");
+		if (process.env[pair[1]] === undefined) process.env[pair[1]] = unquote(pair[2]);
 	}
 }
 
