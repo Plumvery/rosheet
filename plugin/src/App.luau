@@ -219,6 +219,9 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		-- この place から書けないときの理由（スキーマの writablePlaces）。編集も履歴も読めるが
 		-- Apply だけ押せなくなる
 		readOnly = nil :: string?,
+		-- スキーマが今は読めない理由（消された、名前が変わった、Rojo の同期から外れた、
+		-- require が落ちる）。読めているあいだは nil
+		schemaProblem = nil :: string?,
 		-- banner に今出している表示の通し番号。8 秒後の自動消灯が、そのあいだに差し替わった
 		-- 表示を消さないようにするため
 		bannerSeq = 0,
@@ -411,12 +414,26 @@ function App._buildChrome(self: App)
 end
 
 --[[
+	書き込みを止めている理由。止まっているあいだは続く状態なので、banner にも出したままにする。
+
+	スキーマが読めないほうを先に出す。読めないあいだは `writablePlaces` を含む宣言そのものが
+	読めていないので、最後に読めた「この place は書ける／書けない」は、今もそうだとは言えない。
+	今いちばん当てになるのは「スキーマが読めない」のほう。
+]]
+function App._blocked(self: App): string?
+	if self.schemaProblem ~= nil then
+		return self.schemaProblem
+	end
+	return self.readOnly
+end
+
+--[[
 	一時的なエラー（Apply に失敗した、など）は banner に出して 8 秒で消す。一度きりの出来事
 	なので、出したままにすると表を覆い続ける。
 
-	読み取り専用の理由だけは消さない。状態のほうは続くので、説明だけ先に消えると、あとから
-	見た人にはステータス行の `· read-only` しか残らない —— なぜ書けないのか、何をすれば
-	直るのか（版ズレなら「Studio を再起動しろ」）が画面から消える。
+	書き込みを止めている理由（`_blocked`）だけは消さない。状態のほうは続くので、説明だけ先に
+	消えると、あとから見た人にはステータス行の `· read-only` しか残らない —— なぜ書けないのか、
+	何をすれば直るのか（版ズレなら「Studio を再起動しろ」）が画面から消える。
 ]]
 function App._say(self: App, message: string, isError: boolean)
 	if not isError then
@@ -430,7 +447,8 @@ function App._say(self: App, message: string, isError: boolean)
 	-- 予約済みの自動消灯を無効にする。無効にしないと、前のエラーの残り時間でこの表示が消える
 	self.bannerSeq += 1
 
-	if self.readOnly ~= nil and message == self.readOnly then
+	local blocked = self:_blocked()
+	if blocked ~= nil and message == blocked then
 		return
 	end
 
@@ -445,17 +463,18 @@ function App._say(self: App, message: string, isError: boolean)
 end
 
 --[[
-	banner を今の状態に合わせる。読み取り専用なら理由を出したままにし、そうでなければ閉じる。
-	一時的なエラーが読み取り専用の上に重なったときも、消えたあとここへ戻る。
+	banner を今の状態に合わせる。書き込みが止まっているなら理由を出したままにし、そうで
+	なければ閉じる。一時的なエラーがその上に重なったときも、消えたあとここへ戻る。
 ]]
 function App._refreshBanner(self: App)
 	if self.banner == nil then
 		return
 	end
-	-- 予約済みの自動消灯を無効にする。読み取り専用へ戻した表示を、あとから消されないように
+	-- 予約済みの自動消灯を無効にする。理由へ戻した表示を、あとから消されないように
 	self.bannerSeq += 1
-	if self.readOnly ~= nil then
-		self.banner.Text = ` {self.readOnly :: string}`
+	local blocked = self:_blocked()
+	if blocked ~= nil then
+		self.banner.Text = ` {blocked :: string}`
 		self.banner.Visible = true
 	else
 		self.banner.Visible = false
@@ -517,7 +536,9 @@ function App._placeChanged(self: App, reasons: Place.Changes)
 		self:reload()
 		return
 	end
-	if not reasons.schema then
+	-- 読めなくなったあとは、どの変化でも試す。名前を変えて置き直されると変化の理由は
+	-- "schema" にならないので、理由では絞れない
+	if self.schemaProblem == nil and not reasons.schema then
 		return
 	end
 	-- Apply / Restore の最中は触らない。終わったところで reload が走る
@@ -526,7 +547,25 @@ function App._placeChanged(self: App, reasons: Place.Changes)
 	end
 
 	local loaded = loadSchema()
-	if loaded == nil or sameLoaded(loaded :: Loaded, self.loaded) then
+	if loaded == nil then
+		-- スキーマが place から消えた（消した、名前を変えた、Rojo の同期から外れた）。黙って
+		-- 前の宣言のまま編集させ続けると、Apply で何に書くつもりだったのかが分からなくなる。
+		-- 下書きは捨てない —— reload の読めなかった側は下書きにも表にも触らない
+		self:reload()
+		return
+	end
+
+	if sameLoaded(loaded :: Loaded, self.loaded) then
+		if self.schemaProblem == nil then
+			return
+		end
+		-- 読めなくなる前と同じ宣言が戻ってきた（消して undo した、Rojo が置き直した）。
+		-- 下書きも表もそのまま使えるので、止めていた書き込みだけ戻す。ここで読み直すと、
+		-- 消えているあいだ残していた下書きを、戻ってきた拍子に捨てることになる
+		self.schemaProblem = nil
+		self:_refreshGrid()
+		self:_refreshToolbar()
+		self:_refreshBanner()
 		return
 	end
 
@@ -540,17 +579,26 @@ end
 function App.reload(self: App)
 	local loaded, problem = loadSchema()
 	if loaded == nil then
-		-- 見つからないままにしておく。次に Rojo が同期したら _placeChanged がもう一度試す
-		self.schema = nil
-		self:_say(problem :: string, true)
+		-- 読めないあいだは書かせない。`writablePlaces` を含む宣言そのものが読めていないので、
+		-- 最後に読めた「この place は書ける」は、今もそうだとは言えない。次に Rojo が同期
+		-- したら _placeChanged がもう一度試す
+		self.schemaProblem = problem
+		-- 一度読めているなら、表と履歴はそのまま出しておく（読むだけなら害が無い）。
+		-- 読み取り専用へ落ちたことを、表とツールバーにも通す
+		if self.schema ~= nil and self.state ~= nil then
+			self:_refreshGrid()
+			self:_refreshToolbar()
+		end
+		self:_refreshBanner()
 		return
 	end
 
 	local schema = loaded.schema
 	self.schema = schema
+	self.schemaProblem = nil
 	self.readOnly = loaded.readOnly
 	-- 理由はここで出す。この先の途中で失敗しても（publish できない、読めない）、その一時的な
-	-- エラーが消えたあとに理由へ戻る。読み取り専用でなくなったなら、ここで閉じる
+	-- エラーが消えたあとに理由へ戻る。書けるようになったなら、ここで閉じる
 	self:_refreshBanner()
 	self:_refreshPlace()
 
@@ -580,7 +628,7 @@ function App.reload(self: App)
 	--
 	-- 「置いた」で覚えるのが要点。読んだ内容で覚えると、publish が失敗した回のスキーマを
 	-- 置いたことにしてしまい、次からは同じだからと書き直さなくなる
-	if self.readOnly == nil and not Schema.equal(self.publishedSchema, schema) then
+	if self:_blocked() == nil and not Schema.equal(self.publishedSchema, schema) then
 		local published, failure = Session.publishSchema(backend, schema)
 		if not published then
 			self:_say(`Could not publish the schema: {tostring(failure)}`, true)
@@ -663,7 +711,7 @@ function App._refreshGrid(self: App)
 
 	-- 読み取り専用の place では表からも編集させない。Apply だけ止めても、保存できない下書きを
 	-- いくらでも作れてしまい、気づくのは Apply に手を伸ばしたとき
-	self.grid:setReadOnly(self.readOnly ~= nil)
+	self.grid:setReadOnly(self:_blocked() ~= nil)
 
 	self.grid:setSheet(sheet, draft[sheet.name], {
 		onEdit = function(rowIndex: number, columnName: string, value: any): boolean
@@ -744,7 +792,7 @@ function App._refreshToolbar(self: App)
 	local idle = not self.busy
 	local dirty = #changed > 0
 
-	local writable = self.readOnly == nil
+	local writable = self:_blocked() == nil
 	self.applyButton.Text = if self.busy
 		then "Applying..."
 		elseif not writable then "Read-only"
@@ -914,7 +962,7 @@ end
 function App.addRow(self: App)
 	local sheet = self:_sheet()
 	-- ボタンは落としてあるが、ここでも見る。読み取り専用は「押せない」ではなく「しない」
-	if self.busy or self.readOnly ~= nil or sheet.kind ~= "table" or sheet.rows ~= "open" then
+	if self.busy or self:_blocked() ~= nil or sheet.kind ~= "table" or sheet.rows ~= "open" then
 		return
 	end
 
@@ -956,7 +1004,7 @@ end
 function App.deleteRow(self: App)
 	local sheet = self:_sheet()
 	local index = self.grid:selectedRow()
-	if self.busy or self.readOnly ~= nil or sheet.kind ~= "table" or sheet.rows ~= "open" or index == nil then
+	if self.busy or self:_blocked() ~= nil or sheet.kind ~= "table" or sheet.rows ~= "open" or index == nil then
 		return
 	end
 
@@ -982,8 +1030,9 @@ function App.apply(self: App)
 		return
 	end
 	-- ボタンは無効にしてあるが、書き込みを止めるのはここ 1 箇所にしておく
-	if self.readOnly ~= nil then
-		self:_say(self.readOnly :: string, true)
+	local blocked = self:_blocked()
+	if blocked ~= nil then
+		self:_say(blocked :: string, true)
 		return
 	end
 	local changed = self:_changedSheets()

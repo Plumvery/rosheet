@@ -278,6 +278,7 @@ export type Watcher = typeof(setmetatable(
 		scheduled: boolean,
 		pending: Changes,
 		alive: boolean,
+		schemaTracked: { Instance },
 	},
 	Watcher
 ))
@@ -319,6 +320,9 @@ function Watcher.track(self: Watcher, watched: Watched)
 		connection:Disconnect()
 	end
 	self.sources = {}
+	-- 木の増減から理由を分けるのに使う（reasonFor）。名前では見分けられないスキーマがあるので、
+	-- 今読んでいるモジュールそのものを控える
+	self.schemaTracked = watched.schema
 	if not self.alive then
 		return
 	end
@@ -361,13 +365,20 @@ function Place.watch(onChanged: (Changes) -> ()): Watcher
 		scheduled = false,
 		pending = { schema = false, place = false },
 		alive = true,
+		schemaTracked = {},
 	}, Watcher) :: any
 
 	-- Rojo が Source を書き換えるのではなく、インスタンスごと差し替える経路がある。そこだけは
-	-- 木の増減からスキーマの変化を拾う。判定は名前だけで、Source は読まない ——
+	-- 木の増減からスキーマの変化を拾う。判定は名前と実体の一致だけで、Source は読まない ——
 	-- rbxtsc のビルド 1 回で数百の ModuleScript が足されるので、そこで Source を舐めると重い
 	local function reasonFor(descendant: Instance): string
-		return if descendant.Name == SCHEMA_NAME then "schema" else "place"
+		if descendant.Name == SCHEMA_NAME then
+			return "schema"
+		end
+		-- SCHEMA_NAME 以外の名前で置かれたスキーマ（Source から見つけたほう）は、名前では
+		-- 見分けられない。消されたのを "place" と読み違えるとスキーマが place から消えたことに
+		-- 気づけないので、今読んでいるモジュールとの一致も見る。数本しかないので Source は読まない
+		return if table.find(self.schemaTracked, descendant) ~= nil then "schema" else "place"
 	end
 
 	for _, root in roots() do
