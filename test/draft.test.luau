@@ -195,6 +195,43 @@ check("触った数の多い順", authors[1].by == "kae" and authors[1].cells ==
 check("行を足した人も出る", authors[2].by == "sora" and authors[2].cells == 1)
 check("誰も居なければ空", #Draft.otherAuthors(mine, "haru") == 0)
 
+-- ============================================================ 足した行のキーを直す
+
+local rekey = Draft.empty(5)
+Draft.addRow(rekey, "guns", "new1", { id = "new1", damage = 10, name = "" }, "haru", "2026-09-09T01:00:00Z")
+Draft.setCell(rekey, "guns", "new1", "damage", 44, "haru", "2026-09-09T01:00:01Z")
+check("足した行だと分かる", Draft.isAdded(rekey, "guns", "new1"))
+check("足していない行は false", not Draft.isAdded(rekey, "guns", "AK47"))
+
+Draft.rekeyAdded(rekey, "guns", "new1", "AK74")
+check("識別子が付け替わる", Draft.isAdded(rekey, "guns", "AK74"))
+check("古い識別子は残らない", not Draft.isAdded(rekey, "guns", "new1"))
+
+local rekeyed = Draft.apply(schema, base, rekey)
+check("付け替えても行は 1 つ", #(rekeyed.guns :: any) == 3)
+check("付け替えても値は残る", (rekeyed.guns :: any)[3].damage == 44)
+
+-- ============================================================ 共有しないシートを外す
+
+local mixed = Draft.empty(5)
+Draft.setCell(mixed, "guns", "AK47", "damage", 35, "haru", "2026-09-09T01:00:00Z")
+Draft.setCell(mixed, "loose", "1", "label", "z", "haru", "2026-09-09T01:00:01Z")
+Draft.setCell(mixed, "round", Draft.SCALAR_ROW, "SECONDS", 240, "haru", "2026-09-09T01:00:02Z")
+
+local outgoing = Draft.sharableOnly(schema, mixed)
+check("key のある表は出す", outgoing.sheets.guns ~= nil)
+check("scalars は出す", outgoing.sheets.round ~= nil)
+check("key の無い open な表は出さない", outgoing.sheets.loose == nil)
+check("元の下書きからは外れない", mixed.sheets.loose ~= nil)
+check("出す方も base と rev を持つ", outgoing.base == 5 and outgoing.rev == mixed.rev)
+
+-- 共有しないシートの下書きが、押し込みの往復で消えないこと（App._pushShared の戻し方）
+local returned = Draft.sharableOnly(schema, mixed)
+returned.rev += 1
+local afterPush = Draft.merge(mixed, returned)
+check("往復しても共有しないシートは残る", afterPush.sheets.loose ~= nil)
+check("往復で rev が上がる", afterPush.rev == mixed.rev + 1)
+
 -- ============================================================ MemoryStore の上限
 
 check("30KB は載る", Draft.fitsInMemoryStore(30 * 1024))

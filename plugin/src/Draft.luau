@@ -44,11 +44,15 @@ export type SheetDelta = {
 export type Delta = {
 	-- どの commit を土台にした下書きか。base が動いたら下書きは載せ替えられない
 	base: number,
+	-- 押し込むたびに 1 つ上がる。取り込む側が「前に見たものと同じか」を 1 つの数で判別する
+	-- ための番号で、順序の保証には使わない（それは各セルの `at` が持つ）。これが無いと
+	-- 2 秒ごとに表を作り直すことになり、スクロール位置と選択行が飛ぶ
+	rev: number,
 	sheets: { [string]: SheetDelta },
 }
 
 function Draft.empty(base: number): Delta
-	return { base = base, sheets = {} }
+	return { base = base, rev = 0, sheets = {} }
 end
 
 --[[
@@ -131,6 +135,56 @@ function Draft.removeRow(delta: Delta, sheetName: string, rowId: string, by: str
 
 	sheet.cells[rowId] = nil
 	sheet.removed[rowId] = { by = by, at = at }
+end
+
+--[[
+	足したばかりの行のキーが書き換わったら、識別子を付け替える。
+
+	識別子は key の値から作るので、キー列を直すと同じ行の識別子が変わる。付け替えないと、
+	`added` は古い識別子のまま、編集だけが新しい識別子の `cells` に積まれ、どこにも無い行への
+	編集が下書きに残る（足した行のキー列だけは書き換えられる、という仕様がここに効く）。
+]]
+function Draft.rekeyAdded(delta: Delta, sheetName: string, from: string, to: string)
+	local sheet = delta.sheets[sheetName]
+	if sheet == nil or from == to then
+		return
+	end
+	local entry = sheet.added[from]
+	if entry == nil then
+		return
+	end
+	sheet.added[from] = nil
+	sheet.added[to] = entry
+	-- 同じ行に積まれていた編集も連れていく
+	local cells = sheet.cells[from]
+	if cells ~= nil then
+		sheet.cells[from] = nil
+		sheet.cells[to] = cells
+	end
+end
+
+--[[
+	保存先へ出してよい部分だけを取り出す。
+
+	key の無い open な表は共有しない（`Draft.sharable`）。**ローカルの下書きからは外さない** ——
+	外すと、共有下書きから画面を作り直すたびに自分の編集まで消える。出さないだけにして、その
+	シートは今までどおり 1 人の下書きとして振る舞わせる。
+]]
+function Draft.sharableOnly(schema: Schema.Normalized, delta: Delta): Delta
+	local out: Delta = { base = delta.base, rev = delta.rev, sheets = {} }
+	for _, sheet in schema.sheets do
+		local changes = delta.sheets[sheet.name]
+		if changes ~= nil and Draft.sharable(sheet) then
+			out.sheets[sheet.name] = changes
+		end
+	end
+	return out
+end
+
+--[[ 足したばかりの行か ]]
+function Draft.isAdded(delta: Delta, sheetName: string, rowId: string): boolean
+	local sheet = delta.sheets[sheetName]
+	return sheet ~= nil and sheet.added[rowId] ~= nil
 end
 
 --[[ 何も触っていない下書きか。空なら保存先へ置かないし、ベルも鳴らさない ]]
@@ -286,7 +340,7 @@ function Draft.merge(mine: Delta, theirs: Delta): Delta
 		return if theirs.base > mine.base then theirs else mine
 	end
 
-	local merged: Delta = { base = mine.base, sheets = {} }
+	local merged: Delta = { base = mine.base, rev = math.max(mine.rev, theirs.rev), sheets = {} }
 
 	local function take(source: Delta)
 		for sheetName, sheet in source.sheets do
@@ -351,6 +405,15 @@ Draft.MEMORY_STORE_LIMIT = 30 * 1024
 function Draft.fitsInMemoryStore(encodedLength: number): boolean
 	return encodedLength <= Draft.MEMORY_STORE_LIMIT
 end
+
+--[[
+	保存先のキー。DataStore（永続）と MemoryStore（速い経路）で同じ名前を使う。
+
+	シートごとに割らない。差分は全シート合わせても小さく、割ると「1 シートだけ古い」状態が
+	作れてしまう（併合は全体で 1 つの `base` を前提にしている）。`src/store.js` の規則どおり
+	`/` を入れず 50 文字に収める。
+]]
+Draft.KEY = "draft"
 
 Draft.SCALAR_ROW = SCALAR_ROW
 

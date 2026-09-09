@@ -64,6 +64,8 @@ export type Grid = typeof(setmetatable({} :: {
 	locked: boolean,
 	-- 読み取り専用の place。locked と違って一時的なものではないので、見た目まで readonly 列に寄せる
 	readOnly: boolean,
+	-- いま打ち込んでいる TextBox。共有下書きの併合が、打っている最中の文字を書き戻さないため
+	editing: TextBox?,
 	connections: { RBXScriptConnection },
 }, Grid))
 
@@ -234,6 +236,7 @@ function Grid.new(parent: Instance): Grid
 		assets = {},
 		locked = false,
 		readOnly = false,
+		editing = nil,
 		connections = {},
 	}, Grid) :: Grid
 
@@ -297,6 +300,17 @@ function Grid.setReadOnly(self: Grid, readOnly: boolean)
 	end
 	table.clear(self.pool)
 	self:_layout()
+end
+
+--[[
+	いま誰かがセルに打ち込んでいるか。
+
+	共有下書きは他の人の編集を随時こちらへ書き戻すが、打っている最中のセルまで書き戻すと
+	入力中の文字が消える。呼び手は入力が終わるまで反映を待つ。
+]]
+function Grid.isEditing(self: Grid): boolean
+	local box = self.editing
+	return box ~= nil and (box :: TextBox):IsFocused()
 end
 
 --[[ ヘッダの列見出しを作り直す。シートが変わったときだけ ]]
@@ -487,9 +501,13 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 	end
 
 	box.Focused:Connect(function()
+		self.editing = box
 		self:_select(row.index)
 	end)
 	box.FocusLost:Connect(function()
+		if self.editing == box then
+			self.editing = nil
+		end
 		self:_commit(row, cell)
 		-- すぐ閉じると、候補をクリックしたときに Activated より先に消えて選べない
 		task.delay(SUGGESTION_CLOSE_DELAY, function()
@@ -630,9 +648,13 @@ function Grid._buildScalarCells(self: Grid, row: Row)
 	row.cells[2] = cell
 
 	box.Focused:Connect(function()
+		self.editing = box
 		self:_select(row.index)
 	end)
 	box.FocusLost:Connect(function()
+		if self.editing == box then
+			self.editing = nil
+		end
 		self:_commit(row, cell)
 	end)
 	button.Activated:Connect(function()
