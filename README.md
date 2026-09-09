@@ -135,6 +135,9 @@ Studio で place を開き、ツールバーの rosheet を押すとウィンド
 - `readonly` の列はグレーで、編集できない。ただし**足したばかりの行のキー列だけは書き換えられる**（key は空にできないので `new1` のような仮の値が入る。Apply するとグレーに戻る）
 - `boolean` と `enum` はクリックで候補が開き、選んだ値が入る。それ以外のセルは TextBox なので、Studio 上では Ctrl+C / Ctrl+V がそのまま効く
 - 編集は下書きに溜まり、変えたセルが黄色く残る。**Apply を押すまで保存先に触らない**
+- **下書きはチームで 1 つ。** 誰かがセルを直すと数秒で他の人の表にも出る。入力即反映ではない —— 積まれるのは Apply を押したときだけで、そこで 1 つの commit になる。下書きは保存先にも残るので、Studio を閉じても place を開き直しても戻ってくる
+- 他の人の未 Apply の編集が乗っているときは、Apply（と Discard）の前に誰が何セル触っているかが出る。編集中もステータス行に `+2 editing` として出る
+- **他の人が今どのセルを見ているかが枠と名前で出る。** 色はその人のウィジェットごとに決まるので、見ている側が誰でも同じ人が同じ色になる。Studio を閉じると相手の画面からも消える（閉じ方によっては最大 20 秒残る）
 - Apply を押すと 1 つの commit として積まれ、プレイテスト中なら値がその場で入れ替わる
 - 「履歴」で過去の Apply が並ぶ。Restore を押すとその時点の値が**下書きに入る**だけで、保存先はまだ触らない。中身を見てから Apply すれば新しい commit として積まれ、Discard すれば戻す前に返る（履歴は書き換えないので、戻したあとにさらに戻れる）
 - commit には何を変えたのかが自動で付く（`guns +1 ~2, round ~1` —— `+` が足した行、`-` が消した行、`~` が直したもの）。Restore から Apply したものは `revert of #3` で始まる
@@ -232,6 +235,7 @@ Open Cloud の API キー（`ROSHEET_API_KEY`）が要るのは DataStore を触
 | キー | 中身 |
 |---|---|
 | `schema` | プラグインが place のスキーマモジュールから起こした正規形 |
+| `draft` | 共有下書き。`head` からのセル単位の差分と、各セルを誰がいつ触ったか。Apply か Discard で空になる |
 | `head` | `{ "seq": <最新の commit 番号> }` |
 | `commit.<seq>` | その Apply のメタ情報と、シートごとの blob 番号 |
 | `blob.<seq>.<sheet>` | そのシートの値（JSON 文字列） |
@@ -248,6 +252,8 @@ Open Cloud の API キー（`ROSHEET_API_KEY`）が要るのは DataStore を触
 
 - プラグインが DataStore を読み書きするには、place が universe に紐づいて公開されていて、**Studio Access to API Services** が入っている必要がある。同じ universe の place は DataStore を共有するので、テスト用の place で作業する（`writablePlaces` を宣言すれば、本番 place を開いても読み取り専用になる）
 - 1 シートの値は 4MB まで（DataStore のキーあたりの上限）。`rosheet.lock.json` は同じ値を持つので、自然に同じ範囲に収まる
+- **共有下書きの速い経路は MemoryStore で、1 項目 30KB まで**（実測: 30720 は通り、32768 は `ItemValueSizeTooLarge`）。差分 1 セルがおよそ 80 バイトなので数百セルまで。超えると速い経路だけ止まり、DataStore の写し（20 秒ごと）で共有が続く。止まっていることはステータス行に出る
+- **`key` の無い `rows = "open"` な表は下書きを共有しない。** 行を位置でしか見分けられず、相手が行を足すと自分の触っていたセルが別の行を指すため。key を宣言すれば共有される
 - 古い blob は消えない。`rosheet gc` は未実装。入れるときは **tag と `rosheet.lock.json` が参照する blob を回収してはいけない**
 
 ## 進捗
@@ -261,6 +267,8 @@ Open Cloud の API キー（`ROSHEET_API_KEY`）が要るのは DataStore を触
 | pin（`rosheet.lock.json`）とオフライン生成 | 動く | 単体テストと、一時プロジェクトでの `pull` / `check` / `import --local` / `export --local`（キー無し） |
 | CLI | 実装済み | **実 DataStore との疎通は未確認**（`update` / `status` / `tag` / `log` / `revert` / `import`） |
 | Studio プラグイン | 実装済み | コンパイルと `.rbxmx` の組み立てまで。**Studio 実機は未確認** |
+| 共有下書き（チームで 1 つ・再起動で復元・Apply 前の確認） | 実装済み | 併合の規則は単体テスト（45 件）。保存先の側は Studio の編集モードで実測（MemoryStore の 30KB 上限、2 クライアントの `UpdateAsync` 併合、古い時刻の負け）。**UI の往復は未確認** |
+| 他の人のカーソル | 実装済み | 保存先の側は Studio の編集モードで実測（一覧・自分の 1 件の削除・TTL での自然消滅）。**UI の往復は未確認** |
 | ランタイムの live 反映（`bind`） | 実装済み | コンパイルのみ。**Studio 実機は未確認** |
 
 まだ無いもの: 列幅の変更、並べ替えと絞り込み、複数セルの範囲選択、古い blob の掃除（`rosheet gc`）。

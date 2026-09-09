@@ -70,6 +70,24 @@ function Theme.palette(): Palette
 	}
 end
 
+--[[
+	他の人のカーソルの色。
+
+	id から決めるので、**誰の画面でも同じ人が同じ色**になる。「赤い枠の人」と口で言える。
+
+	テーマの色からは作らない。カーソルは背景に馴染ませたいものではなく「そこに誰か居る」を
+	表すものなので、未 Apply の黄色と同じくテーマ非依存で置く。色相だけを散らし、彩度と明度は
+	白抜きの名前が読める値に固定する。
+]]
+function Theme.cursorColor(id: string): Color3
+	local hash = 0
+	for index = 1, #id do
+		hash = (hash * 31 + string.byte(id, index)) % 4096
+	end
+	-- 黄金比で散らす。連番の id が隣り合う色にならない
+	return Color3.fromHSV((hash * 0.618033988749895) % 1, 0.62, 0.9)
+end
+
 --[[ テーマが切り替わったら呼び直す。戻り値で購読を切る ]]
 function Theme.onChanged(callback: () -> ()): () -> ()
 	local connection = studioTheme().Changed:Connect(callback)
