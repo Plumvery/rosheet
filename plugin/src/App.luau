@@ -148,8 +148,8 @@ local function loadSchema(): (Loaded?, string?)
 		return { schema = schema, datastore = datastore, scope = scope, readOnly = readOnly }, nil
 	end
 
-	-- 候補はあったのに、どれも読めなかった（rosheet の runtime モジュールのように、
-	-- defineSchema という語を含むだけのモジュールもここに来る）。最後の理由に一手を添える。
+	-- 候補はあったのに、どれも読めなかった（rosheet と関係なく defineSchema という語を含む
+	-- だけのモジュールもここに来る）。最後の理由に一手を添える。
 	-- ランタイムがズレているなら、まず疑うのはそちら —— 新しいスキーマを古いランタイムで
 	-- 評価すると、宣言が落ちるだけでなく require ごと落ちることがある
 	if stale ~= nil then

@@ -5,6 +5,12 @@
 書式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)、バージョンは
 [Semantic Versioning](https://semver.org/lang/ja/) に従う。1.0 より前は、破壊的変更でマイナーを上げる。
 
+## [Unreleased]
+
+### Fixed
+
+- スキーマが place から消えたときの理由が、原因ではなく **rosheet 自身のランタイム**を指していた（`ReplicatedStorage.TS.rosheet.schema: schema: not the return value of defineSchema` など）。プラグインは Source に `defineSchema` が含まれるかでスキーマを探すが、ランタイムはそれを**定義している**側なので必ず当たる —— `RosheetSchema` があるあいだは名前の一致が先に並ぶので表に出ず、**それが place から消えた瞬間だけ第一候補へ繰り上がる**。読んだ人は触ってはいけないランタイムを直しに行くことになる。ランタイムを候補から外して、「この place にスキーマが無い」を出す。版の目印を持つのは `schema` だけなので、それを抱えている入口（`init`。roblox-ts なら `rosheet`）も一緒に外す。`rosheet runtime` でランタイムを place に置くのは rosheet の想定どおりの構成なので、**置いた人は全員この候補を持っていた。**
+
 ## [0.2.0] - 2026-09-09
 
 ### Added

@@ -59,3 +59,33 @@ assert(
 	declaredVersion == rosheet.VERSION,
 	`プラグインの pattern（{pluginPattern}）で runtime/schema.luau から版が読めない`
 )
+
+--[[
+	ランタイムがスキーマの候補に混ざらないか。
+
+	プラグインは Source に `defineSchema` が含まれるかで place のスキーマを探す。ランタイムは
+	それを**定義している**側なので必ず当たる —— `RosheetSchema` があるあいだは名前の一致が先に
+	並ぶので表に出ないが、それが place から消えた瞬間に第一候補へ繰り上がり、「この place に
+	スキーマが無い」と言うべき場面で、触ってはいけないランタイムの名前が理由として出る。
+
+	外し方は「版の目印を持つモジュールと、それを抱えているモジュール」。目印を持つのは
+	schema.luau だけで、入口の init.luau はそれを子に持つので一緒に外れる。**その 2 本以外の
+	ランタイムファイルが `defineSchema` を含むと、また候補に戻る**ので、ここで見張る。
+]]
+local schemaMarker = string.match(fs.readFile("plugin/src/Place.luau"), 'SCHEMA_MARKER%s*=%s*"([^"]+)"')
+assert(schemaMarker ~= nil, "plugin/src/Place.luau に SCHEMA_MARKER が無い")
+
+for _, entry in fs.readDir("runtime") do
+	if string.match(entry, "%.luau$") == nil then
+		continue
+	end
+	local source = fs.readFile(`runtime/{entry}`)
+	if string.find(source, schemaMarker :: string, 1, true) == nil then
+		continue
+	end
+
+	-- init.luau は目印を持つ schema.luau を子に持つので、抱えている側として外れる
+	local excluded = entry == "init.luau" or string.match(source, pluginPattern :: string) ~= nil
+	print("runtime candidate:", entry, "excluded:", excluded)
+	assert(excluded, `runtime/{entry} は {schemaMarker} を含むのに、プラグインの候補から外れない`)
+end
