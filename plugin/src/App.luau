@@ -216,8 +216,9 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		newRows = {} :: { [string]: { [any]: boolean } },
 		-- 履歴から下書きへ読み込んだ commit。Apply したときに「何へ戻したのか」を残すため
 		restored = nil :: { seq: number, dataset: { [string]: any } }?,
-		-- この place から書けないときの理由（スキーマの writablePlaces）。編集も履歴も読めるが
-		-- Apply だけ押せなくなる
+		-- この place から書けないときの理由（スキーマの writablePlaces、ランタイムの版ズレ）。
+		-- 表と履歴は読めるが、セルに書けず、行も足せず、Apply も押せない（スキーマの publish
+		-- もしない）
 		readOnly = nil :: string?,
 		-- スキーマが今は読めない理由（消された、名前が変わった、Rojo の同期から外れた、
 		-- require が落ちる）。読めているあいだは nil
