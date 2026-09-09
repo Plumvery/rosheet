@@ -18,7 +18,8 @@ export type Callbacks = {
 	isDirty: (rowIndex: number, columnName: string) -> boolean,
 	-- まだ Apply していない、足したばかりの行か。キー列が readonly でもここだけは書かせる
 	isNewRow: (rowIndex: number) -> boolean,
-	onSelectRow: (rowIndex: number?) -> (),
+	-- 選択が動いた。列まで渡すのは、他の人へ見せるカーソルをセルまで絞るため
+	onSelectRow: (rowIndex: number?, columnName: string?) -> (),
 	onError: (message: string) -> (),
 }
 
@@ -66,8 +67,21 @@ export type Grid = typeof(setmetatable({} :: {
 	readOnly: boolean,
 	-- いま打ち込んでいる TextBox。共有下書きの併合が、打っている最中の文字を書き戻さないため
 	editing: TextBox?,
+	-- 選択しているセルの列。行だけだと、他の人に見せるカーソルがセルまで絞れない
+	selectedColumn: string?,
+	-- 他の人のカーソル。body の中に置くので、スクロールに勝手に追従する
+	cursors: { Cursor },
+	cursorLayer: Frame?,
 	connections: { RBXScriptConnection },
 }, Grid))
+
+--[[
+	他の人のカーソル 1 つ。行と列は**位置**で受け取る。
+
+	行の識別子（key の値か位置）と列名から位置を出すのは呼び手の仕事にしてある。Grid にその
+	規則を持たせると、`Draft.rowId` と同じ判断が 2 箇所に増える。
+]]
+export type Cursor = { by: string, row: number, column: number, color: Color3 }
 
 -- ドロップダウンに一度に出す最大の行数。これを超えたら中でスクロールさせる
 local DROPDOWN_MAX_ROWS = 8
@@ -237,6 +251,9 @@ function Grid.new(parent: Instance): Grid
 		locked = false,
 		readOnly = false,
 		editing = nil,
+		selectedColumn = nil,
+		cursors = {},
+		cursorLayer = nil,
 		connections = {},
 	}, Grid) :: Grid
 
@@ -502,7 +519,8 @@ function Grid._buildCell(self: Grid, row: Row, index: number, column: Schema.Col
 
 	box.Focused:Connect(function()
 		self.editing = box
-		self:_select(row.index)
+		local focused = self:_columnFor(row, cell)
+		self:_select(row.index, if focused == nil then nil else (focused :: Schema.Column).name)
 	end)
 	box.FocusLost:Connect(function()
 		if self.editing == box then
@@ -649,7 +667,8 @@ function Grid._buildScalarCells(self: Grid, row: Row)
 
 	box.Focused:Connect(function()
 		self.editing = box
-		self:_select(row.index)
+		local focused = self:_columnFor(row, cell)
+		self:_select(row.index, if focused == nil then nil else (focused :: Schema.Column).name)
 	end)
 	box.FocusLost:Connect(function()
 		if self.editing == box then
@@ -786,7 +805,7 @@ function Grid._openBooleans(self: Grid, row: Row, cell: Cell, column: Schema.Col
 
 	local current = self:_cellValue(index, column.name)
 	self:_openList(cell.frame, { { text = "true" }, { text = "false" } }, displayText(column, current), true, function(picked: string)
-		self:_select(index)
+		self:_select(index, column.name)
 		if callbacks.onEdit(index, column.name, picked == "true") then
 			self:_bindVisible()
 		end
@@ -808,7 +827,7 @@ function Grid._openDropdown(self: Grid, row: Row, cell: Cell, column: Schema.Col
 	end
 
 	self:_openList(cell.frame, options, self:_cellValue(index, column.name), true, function(picked: string)
-		self:_select(index)
+		self:_select(index, column.name)
 		if callbacks.onEdit(index, column.name, picked) then
 			self:_bindVisible()
 		end
@@ -840,7 +859,7 @@ function Grid._openAssetSuggestions(self: Grid, row: Row, cell: Cell, column: Sc
 		if box ~= nil then
 			box.Text = picked
 		end
-		self:_select(index)
+		self:_select(index, column.name)
 		if callbacks.onEdit(index, column.name, picked) then
 			self:_bindVisible()
 		end
@@ -966,20 +985,112 @@ function Grid._rowCount(self: Grid): number
 	return if sheet.kind == "scalars" then #sheet.columns else #(self.value :: { any })
 end
 
-function Grid._select(self: Grid, index: number?)
-	if self.selected == index then
+--[[
+	選択を動かす。列まで覚えるのは、他の人へ見せるカーソルを行ではなくセルまで絞るため。
+
+	行が同じでも列が変われば知らせる。行だけを見て早く返すと、同じ行の中で列を移ったときに
+	相手の画面でカーソルが動かない。
+]]
+function Grid._select(self: Grid, index: number?, columnName: string?)
+	if self.selected == index and self.selectedColumn == columnName then
 		return
 	end
+
+	local rowChanged = self.selected ~= index
 	self.selected = index
+	self.selectedColumn = columnName
+
 	local callbacks = self.callbacks
 	if callbacks ~= nil then
-		callbacks.onSelectRow(index)
+		callbacks.onSelectRow(index, columnName)
 	end
-	self:_bindVisible()
+	-- 貼り直しが要るのは行の縞と行番号の色だけ。列を移っただけなら触らない
+	if rowChanged then
+		self:_bindVisible()
+	end
 end
 
 function Grid.selectedRow(self: Grid): number?
 	return self.selected
+end
+
+--[[ いま選んでいるセル。共有するカーソルの中身 ]]
+function Grid.selectedCell(self: Grid): (number?, string?)
+	return self.selected, self.selectedColumn
+end
+
+--[[
+	他の人のカーソルを差し替える。
+
+	`body` の中に置くので、スクロールには勝手に追従する。列幅が変わると位置がずれるので、
+	`_layout` からも貼り直す。
+]]
+function Grid.setCursors(self: Grid, cursors: { Cursor })
+	self.cursors = cursors
+	self:_drawCursors()
+end
+
+function Grid._drawCursors(self: Grid)
+	local existing = self.cursorLayer
+	if existing == nil then
+		local created = Instance.new("Frame")
+		created.Name = "Cursors"
+		created.BackgroundTransparency = 1
+		created.Size = UDim2.fromScale(1, 1)
+		-- 入力を奪わない。Frame は既定でクリックを通すので、覆いかぶさっても下のセルは押せる
+		created.ZIndex = 5
+		created.Parent = self.body
+		self.cursorLayer = created
+		existing = created
+	end
+
+	local layer = existing :: Frame
+	layer:ClearAllChildren()
+
+	local sheet = self.sheet
+	if sheet == nil then
+		return
+	end
+	local rows = self:_rowCount()
+
+	for _, cursor in self.cursors do
+		local width = self.widths[cursor.column]
+		local offset = self.offsets[cursor.column]
+		-- 相手が別のシートの列数で見ている、消えた行を指している、はどちらも起こりうる
+		if width == nil or offset == nil or cursor.row < 1 or cursor.row > rows then
+			continue
+		end
+
+		local top = (cursor.row - 1) * Theme.ROW_HEIGHT
+
+		local box = Instance.new("Frame")
+		box.Name = cursor.by
+		box.BackgroundTransparency = 1
+		box.Position = UDim2.fromOffset(offset, top)
+		box.Size = UDim2.fromOffset(width - 1, Theme.ROW_HEIGHT - 1)
+		box.ZIndex = 5
+		box.Parent = layer
+
+		local outline = Instance.new("UIStroke")
+		outline.Color = cursor.color
+		outline.Thickness = 2
+		outline.Parent = box
+
+		local tag = Instance.new("TextLabel")
+		tag.Name = "Name"
+		tag.BackgroundColor3 = cursor.color
+		tag.BorderSizePixel = 0
+		tag.Font = Theme.FONT
+		tag.TextSize = 12
+		tag.TextColor3 = Color3.new(1, 1, 1)
+		tag.Text = ` {cursor.by} `
+		tag.AutomaticSize = Enum.AutomaticSize.X
+		tag.Size = UDim2.fromOffset(0, 14)
+		-- 上に出す。いちばん上の行だけは切れるので下へ回す
+		tag.Position = if cursor.row > 1 then UDim2.fromOffset(0, -14) else UDim2.new(0, 0, 1, 0)
+		tag.ZIndex = 6
+		tag.Parent = box
+	end
 end
 
 --[[ 見えている数だけ行の Frame を用意する。シートの列が変わったら作り直す ]]
@@ -1125,6 +1236,8 @@ function Grid._layout(self: Grid)
 	self:_ensurePool()
 	self.body.CanvasSize = UDim2.fromOffset(self.totalWidth, self:_rowCount() * Theme.ROW_HEIGHT)
 	self:_bindVisible()
+	-- 列幅と行数がここで決まる。カーソルはその位置に貼ってあるので、一緒に貼り直す
+	self:_drawCursors()
 end
 
 function Grid.setSheet(self: Grid, sheet: Schema.Sheet, value: any, callbacks: Callbacks)
@@ -1144,6 +1257,10 @@ function Grid.setSheet(self: Grid, sheet: Schema.Sheet, value: any, callbacks: C
 		end
 		table.clear(self.pool)
 		self.selected = nil
+		self.selectedColumn = nil
+		-- 他の人のカーソルは前のシートの中の位置。持ち越すと、別のシートの無関係なセルを囲む。
+		-- 呼び手が引き直すまでは出さない
+		table.clear(self.cursors)
 		self.widths, self.offsets, self.totalWidth = measure(sheet)
 		self:_buildHeader()
 		self.body.CanvasPosition = Vector2.zero

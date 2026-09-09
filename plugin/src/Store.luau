@@ -200,6 +200,76 @@ function Store.memoryStore(name: string): Backend
 end
 
 --[[
+	プレゼンス。誰がいま、どのセルを見ているか。
+
+	`Backend` の形にしない。あちらは「キーを 1 つ読み書きする」ためのもので、こちらに要るのは
+	**一覧**（誰が居るか）と**自分の 1 件を消す**こと。無理に同じ形へ寄せると、使わない口を
+	持つ Backend が増える。
+
+	人ごとに 1 キーにする。1 キーに全員を詰めると、書き込みが人数分ぶつかって UpdateAsync が
+	競り合う。人ごとなら SetAsync で衝突しないうえ、**Studio を閉じた人は TTL で勝手に消える** ——
+	消し忘れた誰かが画面に残り続けることがない。
+
+	下書きとは別の SortedMap にする。同じ map に混ぜると、一覧を引くたびに `draft` まで返る。
+]]
+export type Presence = {
+	label: string,
+	-- 自分の居場所を置く。TTL を延ばすので、鼓動のたびに呼ぶ
+	publish: (id: string, value: any) -> boolean,
+	-- 今この place を見ている人。自分も含む（除くのは呼び手）
+	list: () -> { { id: string, value: any } },
+	-- 閉じるときに自分の 1 件を消す。TTL 任せだと、しばらく画面に残る
+	forget: (id: string) -> (),
+}
+
+-- 鼓動が 1 回落ちたくらいでは消えない長さ。長くすると、閉じた人がいつまでも画面に残る
+local PRESENCE_TTL_SECONDS = 20
+-- 一度に返す人数の上限。これを超えて同じ place を開いていることは考えなくてよい
+local PRESENCE_LIMIT = 30
+
+function Store.presence(name: string): Presence
+	local map = game:GetService("MemoryStoreService"):GetSortedMap(`{name}_presence`)
+
+	return {
+		label = `MemoryStore "{name}_presence"`,
+
+		publish = function(id: string, value: any): boolean
+			return (pcall(function()
+				map:SetAsync(id, encode(value), PRESENCE_TTL_SECONDS)
+			end))
+		end,
+
+		list = function(): { { id: string, value: any } }
+			local success, items = pcall(function()
+				return map:GetRangeAsync(Enum.SortDirection.Ascending, PRESENCE_LIMIT)
+			end)
+			if not success then
+				return {}
+			end
+
+			local out: { { id: string, value: any } } = {}
+			for _, item in items do
+				if type(item.value) ~= "string" then
+					continue
+				end
+				-- 読めない 1 件で全員を消さない。その人だけ飛ばす
+				local decoded, value = decode(item.key, item.value)
+				if decoded then
+					table.insert(out, { id = tostring(item.key), value = value })
+				end
+			end
+			return out
+		end,
+
+		forget = function(id: string)
+			pcall(function()
+				map:RemoveAsync(id)
+			end)
+		end,
+	}
+end
+
+--[[
 	plugin の設定。このマシンのこのユーザーだけに残る。place の公開も API Services も要らないので、
 	まだ公開していない place や個人作業の退路として使う。
 ]]

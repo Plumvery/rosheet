@@ -45,6 +45,14 @@ local SHARE_PUSH_SECONDS = 1
 local SHARE_PULL_SECONDS = 2
 local SHARE_SNAPSHOT_SECONDS = 20
 
+--[[
+	カーソルの鼓動。
+
+	選択が動いたときは待たずに送るので、これは「まだ居る」を伝えるためだけの間隔。
+	`Store` の TTL より十分短くしないと、動かずに見ているだけの人が消えたり出たりする。
+]]
+local PRESENCE_BEAT_SECONDS = 5
+
 local App = {}
 App.__index = App
 
@@ -264,6 +272,14 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		pushDue = false,
 		-- 永続の写しに追いついていない編集がある。無ければ DataStore を触らない
 		snapshotDue = false,
+		-- 誰がどのセルを見ているか。揮発してよい情報なので速い経路にだけ置く
+		presence = nil :: Store.Presence?,
+		presenceDue = false,
+		-- 前に貼ったカーソルの並び。同じなら貼り直さない（作り直すと枠と名前が点滅する）
+		cursorSignature = nil :: string?,
+		-- 自分の居場所。ウィジェットごとに別の id を振るので、同じ人が 2 つ開けばカーソルも 2 つ
+		sessionId = HttpService:GenerateGUID(false),
+		here = nil :: { sheet: string, row: string, column: string? }?,
 		activeSheet = 1,
 		showHistory = false,
 		log = { entries = {} },
@@ -874,6 +890,7 @@ end
 function App._watchShare(self: App)
 	task.spawn(function()
 		local sinceSnapshot = 0
+		local sinceBeat = 0
 		while not self.stopped do
 			task.wait(SHARE_PULL_SECONDS)
 			if self.stopped then
@@ -886,6 +903,15 @@ function App._watchShare(self: App)
 				self:_pushShared(self.memory, false)
 			end
 			self:_pullShared()
+
+			-- カーソルも同じ周回で。動いたときは待たずに送り、動かなければ鼓動だけ
+			sinceBeat += SHARE_PULL_SECONDS
+			if self.presenceDue or sinceBeat >= PRESENCE_BEAT_SECONDS then
+				self.presenceDue = false
+				sinceBeat = 0
+				self:_publishPresence()
+			end
+			self:_pullPresence()
 
 			-- 永続の写しは、押し込むものがあるときだけ数える。無条件に回すと、誰も編集して
 			-- いない place で 20 秒ごとに同じ空の下書きを DataStore へ書き続けることになる
@@ -902,6 +928,135 @@ function App._watchShare(self: App)
 			end
 		end
 	end)
+end
+
+-- ============================================================ カーソル
+
+--[[
+	自分の居場所を覚える。次の周回で送る。
+
+	行は `Draft.rowId` と同じ識別子で持つ。位置で送ると、相手が行を足した瞬間に別の行を
+	指すし、そもそも相手と自分で行数が違いうる。
+]]
+function App._moveHere(self: App, sheet: Schema.Sheet, rowIndex: number?, columnName: string?)
+	if rowIndex == nil or self.draft == nil then
+		self.here = nil
+		self.presenceDue = true
+		return
+	end
+
+	local column = columnName
+	-- scalars は 1 列 = 1 行なので、行番号だけ来たときは定数の名前を引き直す
+	if sheet.kind == "scalars" and column == nil then
+		local constant = sheet.columns[rowIndex :: number]
+		column = if constant == nil then nil else constant.name
+	end
+
+	self.here = {
+		sheet = sheet.name,
+		row = self:_rowId(sheet, rowIndex :: number),
+		column = column,
+	}
+	self.presenceDue = true
+end
+
+function App._publishPresence(self: App)
+	local presence = self.presence
+	if presence == nil then
+		return
+	end
+
+	local here = self.here
+	if here == nil then
+		-- どこも選んでいない。居ることは伝えるが、枠は出さない
+		(presence :: Store.Presence).publish(self.sessionId, { by = author })
+		return
+	end
+
+	;(presence :: Store.Presence).publish(self.sessionId, {
+		by = author,
+		sheet = (here :: any).sheet,
+		row = (here :: any).row,
+		column = (here :: any).column,
+	})
+end
+
+--[[
+	相手の居場所を、今の表の中の位置に直す。
+
+	当たらないことは普通に起きる —— 相手が別のシートを見ている、こちらではまだ見えていない
+	行を指している、相手が消した行を指している。当たらなければ枠を出さない。
+]]
+function App._cursorPosition(self: App, sheet: Schema.Sheet, at: any): (number?, number)
+	if sheet.kind == "scalars" then
+		-- scalars は 1 列 = 1 行。定数の名前が縦の位置になり、横は常に値の列
+		for index, column in sheet.columns do
+			if column.name == at.column then
+				return index, 2
+			end
+		end
+		return nil, 2
+	end
+
+	-- 列が分からなければ 1 列目に出す。行だけでも「誰がどのあたりに居るか」は伝わる
+	local columnIndex = 1
+	for index, column in sheet.columns do
+		if column.name == at.column then
+			columnIndex = index
+			break
+		end
+	end
+
+	for index, row in (self.draft :: any)[sheet.name] :: { any } do
+		if Draft.rowId(sheet, row, index) == at.row then
+			return index, columnIndex
+		end
+	end
+	return nil, columnIndex
+end
+
+function App._pullPresence(self: App)
+	local presence = self.presence
+	if presence == nil or self.schema == nil or self.draft == nil or self.state == nil then
+		return
+	end
+
+	local sheet = self:_sheet()
+	local cursors: { Grid.Cursor } = {}
+	-- 前と同じ並びなら貼り直さない。2 秒ごとに Frame を作り直すと、枠と名前が点滅する
+	local signature: { string } = {}
+
+	for _, entry in (presence :: Store.Presence).list() do
+		-- 自分は出さない。自分のカーソルは Studio が既に見せている
+		if entry.id == self.sessionId then
+			continue
+		end
+		local at = entry.value
+		if type(at) ~= "table" or at.sheet ~= sheet.name then
+			continue
+		end
+
+		local row, column = self:_cursorPosition(sheet, at)
+		if row ~= nil then
+			table.insert(cursors, {
+				by = if type(at.by) == "string" then at.by else "someone",
+				row = row :: number,
+				column = column,
+				-- 色はそのウィジェットの id から決まる。**見ている側が誰でも同じ色**になるので、
+				-- 「赤い枠の人」と口で言える（開き直すと別の色になる。それは別のカーソル）
+				color = Theme.cursorColor(entry.id),
+			})
+		end
+		table.insert(signature, `{entry.id}\0{tostring(row)}\0{tostring(column)}\0{tostring(at.by)}`)
+	end
+
+	-- 並びは `list` の返す順（キーの昇順）なので、同じ顔ぶれなら同じ文字列になる
+	local current = table.concat(signature, "\1")
+	if current == self.cursorSignature then
+		return
+	end
+	self.cursorSignature = current
+	self.grid:setCursors(cursors)
 end
 
 --[[
@@ -948,10 +1103,13 @@ function App.reload(self: App)
 			local memory = Store.memoryStore(loaded.datastore)
 			local reachable = memory.get(Draft.KEY).ok
 			self.memory = if reachable then memory else nil
+			-- カーソルも同じ経路。届かないなら下書きの共有ごと止まっているので、理由は 1 つでよい
+			self.presence = if reachable then Store.presence(loaded.datastore) else nil
 			self.sharePaused = if reachable then nil else "the live channel is not reachable"
 		else
 			-- ローカルの退路には共有の相手が居ない。速い経路も持たない
 			self.memory = nil
+			self.presence = nil
 			self.sharePaused = nil
 			-- 公開していない place や API を入れていない環境でも触れるようにしておく。
 			-- ここで諦めると「何も出ないプラグイン」になり、原因も分からない
@@ -1040,6 +1198,11 @@ function App._buildTabs(self: App)
 
 		tab.Activated:Connect(function()
 			self.activeSheet = index
+			-- シートを移ったら、前のシートの居場所は捨てる。次に選んだところから送り直す
+			self.here = nil
+			self.presenceDue = true
+			-- 他の人のカーソルも、このシートでの位置に引き直す（Grid 側は貼ったものを捨てる）
+			self.cursorSignature = nil
 			self:_buildTabs()
 			self:_refreshGrid()
 			self:_refreshToolbar()
@@ -1117,7 +1280,8 @@ function App._refreshGrid(self: App)
 			return row ~= nil and added[row] == true
 		end,
 
-		onSelectRow = function()
+		onSelectRow = function(rowIndex: number?, columnName: string?)
+			self:_moveHere(sheet, rowIndex, columnName)
 			self:_refreshToolbar()
 		end,
 
@@ -1707,6 +1871,11 @@ end
 function App.destroy(self: App)
 	-- 先に止める。ウィジェットを閉じたあとに head を見に行っても、映す先がもう無い
 	self.stopped = true
+
+	-- 自分のカーソルを片付ける。TTL 任せにすると、閉じたあとも数十秒だけ他の人の画面に残る
+	if self.presence ~= nil then
+		(self.presence :: Store.Presence).forget(self.sessionId)
+	end
 
 	local watcher = self.watcher
 	if watcher ~= nil then
