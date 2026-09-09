@@ -144,28 +144,65 @@ function Place.staleRuntime(): string?
 end
 
 --[[
+	rosheet 自身のランタイムを抱えているか。
+
+	ランタイムは `defineSchema` を**定義している**ので、Source に語が含まれるかだけで探すと
+	必ず候補に当たる。`RosheetSchema` があるあいだは名前の一致が先に並ぶので表には出ないが、
+	それが place から消えた瞬間にランタイムが第一候補へ繰り上がる —— 「この place にスキーマが
+	無い」と言うべき場面で、触ってはいけないランタイムの名前と「defineSchema の戻り値では
+	ない」が出る。
+
+	版の目印（`Place.staleRuntime` が読んでいるのと同じ）を持つのは `schema` だけで、入口の
+	`init`（roblox-ts なら `rosheet`）は `defineSchema` を再輸出するだけなので持たない。
+	目印を持つモジュールを抱えているかどうかまで見て、入口も一緒に外す。
+]]
+local function holdsRuntime(module: ModuleScript, runtime: { ModuleScript }): boolean
+	for _, versioned in runtime do
+		if versioned:IsDescendantOf(module) then
+			return true
+		end
+	end
+	return false
+end
+
+--[[
 	スキーマになりうる ModuleScript を、確からしい順に返す。
 
 	名前が一致するものが先。Rojo が同期する木では `RosheetSchema.luau` がそのまま名前になる。
 	roblox-ts でコンパイルした場合も、呼び出しの `defineSchema` は出力に残る。
+
+	名前で見つけたものは外さない。外すのは語だけで拾ったほう —— 名前を合わせて置いてあるなら、
+	それは置いた人の意思表示で、読めなかったときの理由もそのモジュールを指すのが正しい。
 ]]
 function Place.schemaModules(): { ModuleScript }
 	local named: { ModuleScript } = {}
 	local guessed: { ModuleScript } = {}
+	local runtime: { ModuleScript } = {}
 
 	for _, module in moduleScripts() do
 		if module.Name == SCHEMA_NAME then
 			table.insert(named, module)
+			continue
+		end
+
+		local source = readSource(module)
+		if source == nil or string.find(source :: string, SCHEMA_MARKER, 1, true) == nil then
+			continue
+		end
+		-- 版の目印を探すのは、語で絞ったあとだけ。目印を持つのはランタイム本体（schema）で、
+		-- そちらは defineSchema を定義している側なので必ず語も含む。pattern を全モジュールの
+		-- Source に当てると、rbxtsc の出力のような数百本の place で効いてくる
+		if string.match(source :: string, RUNTIME_VERSION_PATTERN) ~= nil then
+			table.insert(runtime, module)
 		else
-			local source = readSource(module)
-			if source ~= nil and string.find(source, SCHEMA_MARKER, 1, true) ~= nil then
-				table.insert(guessed, module)
-			end
+			table.insert(guessed, module)
 		end
 	end
 
 	for _, module in guessed do
-		table.insert(named, module)
+		if not holdsRuntime(module, runtime) then
+			table.insert(named, module)
+		end
 	end
 	return named
 end
