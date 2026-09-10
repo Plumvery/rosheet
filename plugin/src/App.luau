@@ -6,6 +6,7 @@
 
 local Schema = require(script.Parent.Schema)
 local Rows = require(script.Parent.Rows)
+local Draft = require(script.Parent.Draft)
 local Store = require(script.Parent.Store)
 local Session = require(script.Parent.Session)
 local Grid = require(script.Parent.Grid)
@@ -13,6 +14,7 @@ local Live = require(script.Parent.Live)
 local Theme = require(script.Parent.Theme)
 local Place = require(script.Parent.Place)
 
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local StudioService = game:GetService("StudioService")
 
@@ -28,6 +30,28 @@ local RESTORE_BUTTON_WIDTH = 88
 	いちばん困る状態は消える —— 秒単位の追随が要るなら、それはポーリングではなく別の経路の話。
 ]]
 local HEAD_POLL_SECONDS = 30
+
+--[[
+	共有下書きの押し込みと取り込みの間隔。
+
+	押し込みは打鍵ごとではなく静止してから。1 セル直すたびに書くと、MemoryStore の枠を
+	打鍵の速さで食う。取り込みが 2 秒なのは、これ以上遅いと「相手の編集が見えるまで待つ」
+	時間になり、これ以上速くしても人間の編集速度では変わらないため。
+
+	DataStore への写しはずっと粗くてよい。あちらは Studio を閉じてからの復元だけが仕事で、
+	編集中の追随は MemoryStore が持つ。
+]]
+local SHARE_PUSH_SECONDS = 1
+local SHARE_PULL_SECONDS = 2
+local SHARE_SNAPSHOT_SECONDS = 20
+
+--[[
+	カーソルの鼓動。
+
+	選択が動いたときは待たずに送るので、これは「まだ居る」を伝えるためだけの間隔。
+	`Store` の TTL より十分短くしないと、動かずに見ているだけの人が消えたり出たりする。
+]]
+local PRESENCE_BEAT_SECONDS = 5
 
 local App = {}
 App.__index = App
@@ -245,6 +269,24 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 		remoteHead = nil :: number?,
 		-- 閉じたら head を見に行くのをやめる合図
 		stopped = false,
+		-- 共有下書き。チームで 1 つ持つ、base からのセル単位の差分（Draft.luau）
+		shared = nil :: Draft.Delta?,
+		-- 速い経路。MemoryStore が使えなければ nil のまま、DataStore の写しだけで回る
+		memory = nil :: Store.Backend?,
+		-- 共有が止まっている理由。止まったことに気づけないのがいちばん困る
+		sharePaused = nil :: string?,
+		-- 押し込み待ちの編集がある。静止してからまとめて書くため
+		pushDue = false,
+		-- 永続の写しに追いついていない編集がある。無ければ DataStore を触らない
+		snapshotDue = false,
+		-- 誰がどのセルを見ているか。揮発してよい情報なので速い経路にだけ置く
+		presence = nil :: Store.Presence?,
+		presenceDue = false,
+		-- 前に貼ったカーソルの並び。同じなら貼り直さない（作り直すと枠と名前が点滅する）
+		cursorSignature = nil :: string?,
+		-- 自分の居場所。ウィジェットごとに別の id を振るので、同じ人が 2 つ開けばカーソルも 2 つ
+		sessionId = HttpService:GenerateGUID(false),
+		here = nil :: { sheet: string, row: string, column: string? }?,
 		activeSheet = 1,
 		showHistory = false,
 		log = { entries = {} },
@@ -266,6 +308,7 @@ function App.new(widget: DockWidgetPluginGui, plugin: Plugin): App
 	task.spawn(resolveAuthor)
 	self:reload()
 	self:_watchHead()
+	self:_watchShare()
 	return self
 end
 
@@ -605,8 +648,24 @@ function App._reloadPressed(self: App)
 	if self.busy then
 		return
 	end
-	if self.schema ~= nil and self.state ~= nil and #self:_changedSheets() > 0 then
-		self:_say("Reload would drop the draft. Apply or Discard first", true)
+
+	-- 共有下書きは保存先に残るので、読み直しても戻ってくる。押し込み待ちの分だけ先に出しておく
+	-- （ここは押した瞬間なので、永続の写しも待たずに追いつかせる）
+	if self.pushDue or self.snapshotDue then
+		self.pushDue = false
+		self.snapshotDue = false
+		self:_pushShared(self.memory, false)
+		self:_pushShared(self.backend, true)
+	end
+
+	-- 残らないのは共有しないシートの下書きだけ。そこだけ止める
+	local unshared = self:_unsharedSheets()
+	if #unshared > 0 then
+		self:_say(
+			`Reload would drop the draft in {table.concat(unshared, ", ")} (that sheet is not shared). `
+				.. "Apply or Discard first",
+			true
+		)
 		return
 	end
 	self:reload()
@@ -649,6 +708,440 @@ function App._checkHead(self: App)
 	end
 	self.remoteHead = head
 	self:_refreshToolbar()
+end
+
+-- ============================================================ 共有下書き
+
+--[[
+	保存先から共有下書きを読む。形が違うものは無かったことにする —— 下書きは Apply していない
+	編集なので、壊れた 1 件のために表が出ないより、捨てて作り直す方がまし。
+]]
+function App._readShared(self: App, backend: Store.Backend?): Draft.Delta?
+	if backend == nil then
+		return nil
+	end
+	local result = (backend :: Store.Backend).get(Draft.KEY)
+	if not result.ok then
+		return nil
+	end
+
+	local value = (result :: any).value
+	if type(value) ~= "table" or type(value.base) ~= "number" then
+		return nil
+	end
+	-- 空のテーブルは JSON を往復すると配列になる（`src/store.js` 冒頭）。どちらもテーブルなので
+	-- 字引きとしてはそのまま使えるが、鍵ごと欠けている場合だけ埋める
+	if type(value.sheets) ~= "table" then
+		value.sheets = {}
+	end
+	if type(value.rev) ~= "number" then
+		value.rev = 0
+	end
+	return value :: Draft.Delta
+end
+
+--[[
+	開いたとき・読み直したときに、共有下書きを拾い直す。
+
+	速い方（MemoryStore）を先に見る。編集中の最新はそちらに居て、DataStore の写しは最大
+	`SHARE_SNAPSHOT_SECONDS` 古い。MemoryStore が空なら、Studio を全員が閉じたあとなので
+	DataStore の写しから復元する —— **place を開き直しても下書きが残る**のはこの経路。
+]]
+function App._restoreShared(self: App)
+	local state = self.state :: Session.State
+
+	local delta = self:_readShared(self.memory)
+	if delta == nil then
+		delta = self:_readShared(self.backend)
+	end
+
+	if delta ~= nil and (delta :: Draft.Delta).base == state.head then
+		self.shared = delta
+		return
+	end
+
+	-- 中身のある下書きを捨てたときだけ言う。Apply の直後は空の下書きが 1 つ前の番号で
+	-- 残っているので、黙って作り直さないと毎回赤いバナーが出る
+	if delta ~= nil and not Draft.isEmpty(delta :: Draft.Delta) then
+		-- 土台が違う下書きは載せ替えられない。行の識別子が別の行を指しうるので、混ぜると
+		-- 無関係な行に値を書く。次の押し込みで base の新しい方に置き換わる
+		self:_say(
+			`Dropped a shared draft built on #{(delta :: Draft.Delta).base} (the table is now at #{state.head})`,
+			true
+		)
+	end
+	self.shared = Draft.empty(state.head)
+end
+
+--[[
+	下書きがあるのに共有されていないシート。key の無い open な表は、行を位置でしか見分け
+	られないので共有から外してある（`Draft.sharable`）。そこの下書きだけは保存先のどこにも
+	無いので、読み直すと消える。
+]]
+function App._unsharedSheets(self: App): { string }
+	local schema = self.schema
+	local state = self.state
+	local draft = self.draft
+	if schema == nil or state == nil or draft == nil then
+		return {}
+	end
+
+	local saved = (state :: Session.State).dataset
+	local names: { string } = {}
+	for _, sheet in (schema :: Schema.Normalized).sheets do
+		if not Draft.sharable(sheet) and not Rows.equal(sheet, saved[sheet.name], (draft :: any)[sheet.name]) then
+			table.insert(names, sheet.name)
+		end
+	end
+	return names
+end
+
+--[[
+	共有下書きから、画面に出すデータセットを作り直す。
+
+	`newRows` も作り直す。`Draft.apply` は行のテーブルを作り直すので、前の参照は死んでいる。
+	ここを飛ばすと、足したばかりの行のキー列が readonly のままになって直せない。
+]]
+function App._applyShared(self: App)
+	local schema = self.schema :: Schema.Normalized
+	local state = self.state :: Session.State
+	local shared = self.shared :: Draft.Delta
+
+	self.draft = Draft.apply(schema, state.dataset, shared)
+
+	self.newRows = {}
+	for _, sheet in schema.sheets do
+		local changes = shared.sheets[sheet.name]
+		if changes == nil or next(changes.added) == nil then
+			continue
+		end
+		local added: { [any]: boolean } = {}
+		for index, row in (self.draft :: any)[sheet.name] do
+			if changes.added[Draft.rowId(sheet, row, index)] ~= nil then
+				added[row] = true
+			end
+		end
+		self.newRows[sheet.name] = added
+	end
+end
+
+--[[
+	下書きの変更を共有下書きへ記録する。押し込みは次の周回でまとめて（打鍵ごとに書くと、
+	MemoryStore の枠を打鍵の速さで食う）。
+
+	`Draft.sharable` でないシートも記録はする。記録しないと、共有下書きから画面を作り直した
+	ときに自分の編集まで消える。押し込む側で外す（`Draft.sharableOnly`）。
+]]
+function App._share(self: App, sheet: Schema.Sheet, record: (Draft.Delta, string, string) -> ())
+	local shared = self.shared
+	if shared == nil then
+		return
+	end
+	record(shared :: Draft.Delta, author, DateTime.now():ToIsoDate())
+	if Draft.sharable(sheet) then
+		self.pushDue = true
+	end
+end
+
+--[[ その行の識別子。`Draft.rowId` に渡す行を下書きから引くだけ ]]
+function App._rowId(self: App, sheet: Schema.Sheet, rowIndex: number): string
+	if sheet.kind == "scalars" then
+		return Draft.SCALAR_ROW
+	end
+	local rows = (self.draft :: any)[sheet.name] :: { any }
+	return Draft.rowId(sheet, rows[rowIndex], rowIndex)
+end
+
+--[[
+	共有下書きを保存先へ押し込む。
+
+	丸ごと置かずに `update` で併合する。置くと、読んでから書くまでの隙間に入った他の人の編集が
+	消える。併合なら、違うセルを触っているかぎり誰も消えない。
+
+	`rev` はここで上げる。取り込む側が「前に見たものと同じか」を 1 つの数で判別できるように
+	するためで、これが無いと 2 秒ごとに表を作り直すことになる。
+]]
+function App._pushShared(self: App, backend: Store.Backend?, durable: boolean)
+	local shared = self.shared
+	-- `Draft.sharableOnly` がスキーマを舐めるので、消えているあいだは押し込まない
+	if backend == nil or shared == nil or self.schema == nil then
+		return
+	end
+
+	-- key の無い open な表は出さない。行を位置でしか見分けられず、相手が行を足した瞬間に
+	-- 別の行を指す（自分の下書きには残る）
+	local mine = Draft.sharableOnly(self.schema :: Schema.Normalized, shared :: Draft.Delta)
+
+	-- MemoryStore は 1 項目 30KB まで。あふれたら速い経路だけ諦め、DataStore の写しは続ける。
+	-- 黙って落とすと、共有が止まったことに誰も気づかない
+	if not durable then
+		local encoded = HttpService:JSONEncode(mine)
+		if not Draft.fitsInMemoryStore(#encoded) then
+			if self.sharePaused == nil then
+				self.sharePaused = "the draft outgrew the live channel (30KB)"
+				self:_refreshToolbar()
+			end
+			return
+		end
+	end
+
+	local result = (backend :: Store.Backend).update(Draft.KEY, function(current: any): any
+		local merged = mine
+		if type(current) == "table" and type(current.base) == "number" then
+			if type(current.sheets) ~= "table" then
+				current.sheets = {}
+			end
+			if type(current.rev) ~= "number" then
+				current.rev = 0
+			end
+			merged = Draft.merge(current :: Draft.Delta, mine)
+		end
+		merged.rev += 1
+		return merged
+	end)
+
+	if not result.ok then
+		if not durable and self.sharePaused == nil then
+			self.sharePaused = "the live channel is not reachable"
+			self:_refreshToolbar()
+		end
+		return
+	end
+
+	-- 併合された結果を自分の下書きへ戻す。押し込みの返り値には、相手が同じ隙間で入れた編集も
+	-- 載っている（表への反映は `_pullShared` が入力中でないことを見てからやる）。
+	--
+	-- 置き換えずに併合するのは、返り値には共有しないシートが入っていないため。置き換えると、
+	-- key の無い表の下書きが押し込みのたびに消える
+	local returned = (result :: any).value
+	if type(returned) == "table" and type(returned.base) == "number" and type(returned.sheets) == "table" then
+		if type(returned.rev) ~= "number" then
+			returned.rev = 0
+		end
+		self.shared = Draft.merge(self.shared :: Draft.Delta, returned :: Draft.Delta)
+	end
+	if not durable and self.sharePaused ~= nil then
+		self.sharePaused = nil
+		self:_refreshToolbar()
+	end
+end
+
+--[[
+	他の人の編集を取り込む。
+
+	**打ち込んでいる最中は表に書き戻さない。** 併合はセル単位なので他人のセルしか変わらないが、
+	`_refreshGrid` はセルを束ねて貼り直すので、入力中の TextBox の中身まで戻ってしまう。
+	下書き自体は取り込んでおいて、貼り直しだけを入力が終わるまで遅らせる。
+]]
+function App._pullShared(self: App)
+	local shared = self.shared
+	-- スキーマは place から消えうる（消した・名前を変えた・Rojo の同期から外れた）。そのとき
+	-- `reload` は schema だけを nil にして state は残すので、schema を見ないと `_applyShared` が
+	-- 2 秒ごとに nil を舐めることになる
+	if self.busy or shared == nil or self.state == nil or self.schema == nil then
+		return
+	end
+
+	local delta = self:_readShared(self.memory)
+	if delta == nil then
+		return
+	end
+	-- 前に見たものと同じなら、併合も貼り直しもしない
+	if (delta :: Draft.Delta).rev == (shared :: Draft.Delta).rev then
+		return
+	end
+
+	local merged = Draft.merge(shared :: Draft.Delta, delta :: Draft.Delta)
+	if merged.base ~= (self.state :: Session.State).head then
+		-- 土台が動いた。何をすればよいかは head のポーリングが出す
+		return
+	end
+
+	self.shared = merged
+	if self.grid:isEditing() then
+		return
+	end
+	self:_applyShared()
+	self:_refreshGrid()
+	self:_refreshToolbar()
+end
+
+--[[
+	共有下書きの押し込みと取り込み。head のポーリングとは別の周期なので、別の周回で回す。
+
+	1 本の周回で 3 つの間隔をまかなう。task.spawn を 3 つ並べると、閉じたときに止め忘れる口が
+	3 つに増える。
+]]
+function App._watchShare(self: App)
+	task.spawn(function()
+		local sinceSnapshot = 0
+		local sinceBeat = 0
+		while not self.stopped do
+			task.wait(SHARE_PULL_SECONDS)
+			if self.stopped then
+				break
+			end
+
+			if self.pushDue then
+				self.pushDue = false
+				self.snapshotDue = true
+				self:_pushShared(self.memory, false)
+			end
+			self:_pullShared()
+
+			-- カーソルも同じ周回で。動いたときは待たずに送り、動かなければ鼓動だけ
+			sinceBeat += SHARE_PULL_SECONDS
+			if self.presenceDue or sinceBeat >= PRESENCE_BEAT_SECONDS then
+				self.presenceDue = false
+				sinceBeat = 0
+				self:_publishPresence()
+			end
+			self:_pullPresence()
+
+			-- 永続の写しは、押し込むものがあるときだけ数える。無条件に回すと、誰も編集して
+			-- いない place で 20 秒ごとに同じ空の下書きを DataStore へ書き続けることになる
+			-- （同一キーの書き込みには間隔の制限がある）
+			if not self.snapshotDue then
+				sinceSnapshot = 0
+				continue
+			end
+			sinceSnapshot += SHARE_PULL_SECONDS
+			if sinceSnapshot >= SHARE_SNAPSHOT_SECONDS then
+				sinceSnapshot = 0
+				self.snapshotDue = false
+				self:_pushShared(self.backend, true)
+			end
+		end
+	end)
+end
+
+-- ============================================================ カーソル
+
+--[[
+	自分の居場所を覚える。次の周回で送る。
+
+	行は `Draft.rowId` と同じ識別子で持つ。位置で送ると、相手が行を足した瞬間に別の行を
+	指すし、そもそも相手と自分で行数が違いうる。
+]]
+function App._moveHere(self: App, sheet: Schema.Sheet, rowIndex: number?, columnName: string?)
+	if rowIndex == nil or self.draft == nil then
+		self.here = nil
+		self.presenceDue = true
+		return
+	end
+
+	local column = columnName
+	-- scalars は 1 列 = 1 行なので、行番号だけ来たときは定数の名前を引き直す
+	if sheet.kind == "scalars" and column == nil then
+		local constant = sheet.columns[rowIndex :: number]
+		column = if constant == nil then nil else constant.name
+	end
+
+	self.here = {
+		sheet = sheet.name,
+		row = self:_rowId(sheet, rowIndex :: number),
+		column = column,
+	}
+	self.presenceDue = true
+end
+
+function App._publishPresence(self: App)
+	local presence = self.presence
+	if presence == nil then
+		return
+	end
+
+	local here = self.here
+	if here == nil then
+		-- どこも選んでいない。居ることは伝えるが、枠は出さない
+		(presence :: Store.Presence).publish(self.sessionId, { by = author })
+		return
+	end
+
+	;(presence :: Store.Presence).publish(self.sessionId, {
+		by = author,
+		sheet = (here :: any).sheet,
+		row = (here :: any).row,
+		column = (here :: any).column,
+	})
+end
+
+--[[
+	相手の居場所を、今の表の中の位置に直す。
+
+	当たらないことは普通に起きる —— 相手が別のシートを見ている、こちらではまだ見えていない
+	行を指している、相手が消した行を指している。当たらなければ枠を出さない。
+]]
+function App._cursorPosition(self: App, sheet: Schema.Sheet, at: any): (number?, number)
+	if sheet.kind == "scalars" then
+		-- scalars は 1 列 = 1 行。定数の名前が縦の位置になり、横は常に値の列
+		for index, column in sheet.columns do
+			if column.name == at.column then
+				return index, 2
+			end
+		end
+		return nil, 2
+	end
+
+	-- 列が分からなければ 1 列目に出す。行だけでも「誰がどのあたりに居るか」は伝わる
+	local columnIndex = 1
+	for index, column in sheet.columns do
+		if column.name == at.column then
+			columnIndex = index
+			break
+		end
+	end
+
+	for index, row in (self.draft :: any)[sheet.name] :: { any } do
+		if Draft.rowId(sheet, row, index) == at.row then
+			return index, columnIndex
+		end
+	end
+	return nil, columnIndex
+end
+
+function App._pullPresence(self: App)
+	local presence = self.presence
+	if presence == nil or self.schema == nil or self.draft == nil or self.state == nil then
+		return
+	end
+
+	local sheet = self:_sheet()
+	local cursors: { Grid.Cursor } = {}
+	-- 前と同じ並びなら貼り直さない。2 秒ごとに Frame を作り直すと、枠と名前が点滅する
+	local signature: { string } = {}
+
+	for _, entry in (presence :: Store.Presence).list() do
+		-- 自分は出さない。自分のカーソルは Studio が既に見せている
+		if entry.id == self.sessionId then
+			continue
+		end
+		local at = entry.value
+		if type(at) ~= "table" or at.sheet ~= sheet.name then
+			continue
+		end
+
+		local row, column = self:_cursorPosition(sheet, at)
+		if row ~= nil then
+			table.insert(cursors, {
+				by = if type(at.by) == "string" then at.by else "someone",
+				row = row :: number,
+				column = column,
+				-- 色はそのウィジェットの id から決まる。**見ている側が誰でも同じ色**になるので、
+				-- 「赤い枠の人」と口で言える（開き直すと別の色になる。それは別のカーソル）
+				color = Theme.cursorColor(entry.id),
+			})
+		end
+		table.insert(signature, `{entry.id}\0{tostring(row)}\0{tostring(column)}\0{tostring(at.by)}`)
+	end
+
+	-- 並びは `list` の返す順（キーの昇順）なので、同じ顔ぶれなら同じ文字列になる
+	local current = table.concat(signature, "\1")
+	if current == self.cursorSignature then
+		return
+	end
+	self.cursorSignature = current
+	self.grid:setCursors(cursors)
 end
 
 --[[
@@ -702,7 +1195,19 @@ function App.reload(self: App)
 		local usable, why = Store.probe(dataStore)
 		if usable then
 			self.backend = dataStore
+			-- 共有下書きの速い経路。DataStore が使えるなら同じ API 権限で届くはずだが、
+			-- 届かなくても表は出す（そのときは DataStore の写しだけで、粗いが共有はできる）
+			local memory = Store.memoryStore(loaded.datastore)
+			local reachable = memory.get(Draft.KEY).ok
+			self.memory = if reachable then memory else nil
+			-- カーソルも同じ経路。届かないなら下書きの共有ごと止まっているので、理由は 1 つでよい
+			self.presence = if reachable then Store.presence(loaded.datastore) else nil
+			self.sharePaused = if reachable then nil else "the live channel is not reachable"
 		else
+			-- ローカルの退路には共有の相手が居ない。速い経路も持たない
+			self.memory = nil
+			self.presence = nil
+			self.sharePaused = nil
 			-- 公開していない place や API を入れていない環境でも触れるようにしておく。
 			-- ここで諦めると「何も出ないプラグイン」になり、原因も分からない
 			self.backend = Store.pluginSettings(self.plugin, loaded.datastore)
@@ -737,8 +1242,10 @@ function App.reload(self: App)
 	end
 
 	self.state = state
-	self.draft = Rows.cloneDataset(schema, (state :: Session.State).dataset)
-	self.newRows = {}
+	-- 共有下書きを拾い直してから画面を作る。下書きは保存先に残るので、Studio を閉じても
+	-- place を開き直しても、Apply していない編集はここで戻ってくる
+	self:_restoreShared()
+	self:_applyShared()
 	self.restored = nil
 	self.activeSheet = math.min(self.activeSheet, #schema.sheets)
 
@@ -784,6 +1291,11 @@ function App._buildTabs(self: App)
 
 		tab.Activated:Connect(function()
 			self.activeSheet = index
+			-- シートを移ったら、前のシートの居場所は捨てる。次に選んだところから送り直す
+			self.here = nil
+			self.presenceDue = true
+			-- 他の人のカーソルも、このシートでの位置に引き直す（Grid 側は貼ったものを捨てる）
+			self.cursorSignature = nil
 			self:_buildTabs()
 			self:_refreshGrid()
 			self:_refreshToolbar()
@@ -808,6 +1320,9 @@ function App._refreshGrid(self: App)
 
 	self.grid:setSheet(sheet, draft[sheet.name], {
 		onEdit = function(rowIndex: number, columnName: string, value: any): boolean
+			-- 書き換える前に控える。キー列を直すと、同じ行の識別子が変わる
+			local rowId = self:_rowId(sheet, rowIndex)
+
 			if sheet.kind == "scalars" then
 				(draft[sheet.name] :: { [string]: any })[columnName] = value
 			else
@@ -817,6 +1332,17 @@ function App._refreshGrid(self: App)
 				end
 				row[columnName] = value
 			end
+
+			self:_share(sheet, function(shared: Draft.Delta, by: string, at: string)
+				-- 足したばかりの行のキー列。識別子を付け替えてから書く
+				if columnName == sheet.key and Draft.isAdded(shared, sheet.name, rowId) then
+					Draft.rekeyAdded(shared, sheet.name, rowId, tostring(value))
+					Draft.setCell(shared, sheet.name, tostring(value), columnName, value, by, at)
+					return
+				end
+				Draft.setCell(shared, sheet.name, rowId, columnName, value, by, at)
+			end)
+
 			self:_refreshToolbar()
 			return true
 		end,
@@ -847,7 +1373,8 @@ function App._refreshGrid(self: App)
 			return row ~= nil and added[row] == true
 		end,
 
-		onSelectRow = function()
+		onSelectRow = function(rowIndex: number?, columnName: string?)
+			self:_moveHere(sheet, rowIndex, columnName)
 			self:_refreshToolbar()
 		end,
 
@@ -893,7 +1420,7 @@ function App._refreshToolbar(self: App)
 		else "Apply"
 	setEnabled(self.applyButton, idle and dirty and writable)
 	-- Discard は常に出す。変更があるときだけ現れると、押せる場所が動いて狙いにくい
-	setEnabled(self.discardButton, idle and dirty)
+	setEnabled(self.discardButton, idle and dirty and writable)
 
 	-- 行の増減も書き込み。読み取り専用の place では入口ごと閉じる
 	local canAddRows = sheet.kind == "table" and sheet.rows == "open" and writable
@@ -914,12 +1441,24 @@ function App._refreshToolbar(self: App)
 	local locked = if writable then "" else " \u{00B7} read-only"
 	-- 自分の番号のすぐ隣に出す。末尾に足すと、保存先の名前と pin の距離の向こう側になって読まれない
 	local behind = self:_behindNotice(dirty)
+
+	-- 誰の編集が下書きに乗っているか。押す前に「自分の分だけではない」と分かる必要がある
+	local others = self:_otherAuthors()
+	local team = if #others == 0 then "" else ` \u{00B7} +{#others} editing`
+	-- 共有が止まっていることに気づけないのがいちばん困る。止まっていれば必ず出す
+	local paused = if self.sharePaused == nil then "" else ` \u{00B7} not shared ({self.sharePaused})`
+
 	self.status.Text = if self.busyLabel ~= nil
 		then self.busyLabel :: string
-		else `#{state.head}{behind} \u{00B7} {backend.label}{self:_pinDistance()}{locked}{where}`
+		else `#{state.head}{behind}{team}{paused} \u{00B7} {backend.label}{self:_pinDistance()}{locked}{where}`
+
 	-- ステータス行には常に何か書いてあるので、文言が 1 つ増えただけでは気づかれない。色も変える
 	local colors = Theme.palette()
-	self.status.TextColor3 = if behind ~= "" and self.busyLabel == nil then colors.accent else colors.dimText
+	self.status.TextColor3 = if self.busyLabel ~= nil
+		then colors.dimText
+		elseif self.sharePaused ~= nil then colors.danger
+		elseif behind ~= "" or team ~= "" then colors.accent
+		else colors.dimText
 end
 
 --[[
@@ -1032,16 +1571,38 @@ function App.discard(self: App)
 	if self.busy then
 		return
 	end
+	-- 下書きがチームで 1 つになったので、Discard は**他の人の未 Apply の編集ごと**保存先から
+	-- 消す。読み取り専用の place からそれができると、本番 place を開いた誰かがチームの下書きを
+	-- 消せてしまう。Apply を止めているのと同じ理由でここも止める
+	if self.readOnly ~= nil then
+		self:_say(self.readOnly :: string, true)
+		return
+	end
 	local changed = self:_changedSheets()
 	if #changed == 0 then
 		return
 	end
 
-	-- 捨てた編集は戻せない（Apply していないので履歴にも無い）。確認を挟む
-	self:_confirm(`Discard unapplied edits in {table.concat(changed, ", ")}?`, "Discard", function()
-		local schema = self.schema :: Schema.Normalized
-		self.draft = Rows.cloneDataset(schema, (self.state :: Session.State).dataset)
-		self.newRows = {}
+	-- 捨てた編集は戻せない（Apply していないので履歴にも無い）。確認を挟む。
+	--
+	-- 下書きはチームで 1 つなので、Discard は自分の編集だけを捨てるとは限らない。誰の分まで
+	-- 消えるのかを、Apply と同じように押す前に見せる
+	local others = self:_otherAuthors()
+	local whose = ""
+	if #others > 0 then
+		local parts: { string } = {}
+		for _, who in others do
+			table.insert(parts, `{who.by} ({who.cells})`)
+		end
+		whose = ` This also discards edits from {table.concat(parts, ", ")}.`
+	end
+
+	self:_confirm(`Discard unapplied edits in {table.concat(changed, ", ")}?{whose}`, "Discard", function()
+		if self.busy or self.state == nil then
+			return
+		end
+		self:_clearShared((self.state :: Session.State).head)
+		self:_applyShared()
 		self.restored = nil
 		self:_refreshGrid()
 		self:_refreshToolbar()
@@ -1095,6 +1656,10 @@ function App.addRow(self: App)
 	end
 	added[row] = true
 
+	self:_share(sheet, function(shared: Draft.Delta, by: string, at: string)
+		Draft.addRow(shared, sheet.name, Draft.rowId(sheet, row, #rows), table.clone(row), by, at)
+	end)
+
 	self.grid:setValue(rows)
 	self:_refreshToolbar()
 end
@@ -1110,12 +1675,18 @@ function App.deleteRow(self: App)
 	if rows[index] == nil then
 		return
 	end
+	-- 識別子は消す前に作る。消してからだと、位置で見分けるシートで隣の行を指す
+	local rowId = Draft.rowId(sheet, rows[index], index)
 	local removed = table.remove(rows, index)
 
 	local added = self.newRows[sheet.name]
 	if added ~= nil and removed ~= nil then
 		added[removed] = nil
 	end
+
+	self:_share(sheet, function(shared: Draft.Delta, by: string, at: string)
+		Draft.removeRow(shared, sheet.name, rowId, by, at)
+	end)
 
 	self.grid:setValue(rows)
 	self:_refreshToolbar()
@@ -1138,6 +1709,64 @@ function App.apply(self: App)
 		return
 	end
 
+	-- 下書きはチームで 1 つなので、Apply は自分の編集だけを出荷するとは限らない。
+	-- 誰の編集が一緒に乗るのかを、押す前に見せる
+	local others = self:_otherAuthors()
+	if #others == 0 then
+		self:_applyNow(changed)
+		return
+	end
+
+	local parts: { string } = {}
+	for _, who in others do
+		table.insert(parts, `{who.by} ({who.cells})`)
+	end
+	self:_confirm(
+		`This draft also has unapplied edits from {table.concat(parts, ", ")}. `
+			.. `Applying ships all of them together as one commit.`,
+		"Apply all",
+		function()
+			-- 確認しているあいだに誰かが Apply しているかもしれない
+			if self.busy or self.state == nil then
+				return
+			end
+			local still = self:_changedSheets()
+			if #still > 0 then
+				self:_applyNow(still)
+			end
+		end
+	)
+end
+
+--[[ 自分以外に誰が下書きを触っているか。確認ダイアログとステータス行が使う ]]
+function App._otherAuthors(self: App): { Draft.Contributor }
+	local shared = self.shared
+	if shared == nil then
+		return {}
+	end
+	return Draft.otherAuthors(shared :: Draft.Delta, author)
+end
+
+--[[
+	共有下書きを空にする。Apply して出荷したあとと、Discard したあと。
+
+	**両方の保存先から消す。** 速い方だけ消すと、DataStore の写しから次の復元で戻ってくる。
+]]
+function App._clearShared(self: App, base: number)
+	local emptied = Draft.empty(base)
+	self.shared = emptied
+	self.pushDue = false
+	self.snapshotDue = false
+
+	if self.memory ~= nil then
+		(self.memory :: Store.Backend).set(Draft.KEY, emptied)
+	end
+	if self.backend ~= nil then
+		(self.backend :: Store.Backend).set(Draft.KEY, emptied)
+	end
+end
+
+function App._applyNow(self: App, changed: { string })
 	self:_setBusy(true, "Applying...")
 
 	task.spawn(function()
@@ -1177,6 +1806,10 @@ function App.apply(self: App)
 		end
 
 		local commit = result :: Session.Commit
+		-- 出荷した下書きは消す。残すと、次に開いた人が Apply 済みの編集を下書きとして見せられ、
+		-- もう一度同じものを Apply することになる。新しい番号で空にするので、直後の reload が
+		-- 「土台の違う下書き」として拾い直すこともない
+		self:_clearShared(commit.seq)
 		Live.publish(schema, self.draft :: any, commit.seq)
 		-- 読み直しまで busy のまま。ここで先に解除すると、画面がまだ古いうちに押せてしまい、
 		-- 直後に表が入れ替わる
@@ -1339,6 +1972,11 @@ end
 function App.destroy(self: App)
 	-- 先に止める。ウィジェットを閉じたあとに head を見に行っても、映す先がもう無い
 	self.stopped = true
+
+	-- 自分のカーソルを片付ける。TTL 任せにすると、閉じたあとも数十秒だけ他の人の画面に残る
+	if self.presence ~= nil then
+		(self.presence :: Store.Presence).forget(self.sessionId)
+	end
 
 	local watcher = self.watcher
 	if watcher ~= nil then
